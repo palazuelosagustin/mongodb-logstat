@@ -1,5 +1,5 @@
 ---
-name: mongodb-logstat
+name: mongodb-logstat-skill
 description: Analyze MongoDB slow-query JSON logs with the local mongodb-logstat CLI. Use when Codex needs to summarize slow operations, build time-bucketed timelines, inspect top query shapes, choose the right report and flags, or explain mongodb-logstat output for a mongod.log or directory of logs.
 ---
 
