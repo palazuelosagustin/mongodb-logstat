@@ -14,8 +14,9 @@ import (
 )
 
 type parseOptions struct {
-	From *time.Time
-	To   *time.Time
+	From         *time.Time
+	To           *time.Time
+	OnStructured func(time.Time)
 }
 
 func parseFiles(paths []string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) {
@@ -59,7 +60,18 @@ func parseFile(path string, opts parseOptions, visitor func(*SlowOperation), sta
 			continue
 		}
 
-		op, status := parseSlowOperationLine(line, path, lineNumber, stats)
+		raw, ok := parseStructuredLine(line, stats)
+		if !ok {
+			continue
+		}
+		if ts, ok := parseTimestamp(raw["t"]); ok {
+			updateObservedRange(&stats.InputObservedFrom, &stats.InputObservedTo, ts)
+			if opts.OnStructured != nil {
+				opts.OnStructured(ts)
+			}
+		}
+
+		op, status := parseSlowOperationDoc(raw, path, lineNumber, stats)
 		if status == lineRejected {
 			continue
 		}
@@ -70,13 +82,19 @@ func parseFile(path string, opts parseOptions, visitor func(*SlowOperation), sta
 
 		if opts.From != nil && op.Timestamp.Before(*opts.From) {
 			stats.Diagnostics.RecordsFiltered++
+			stats.Diagnostics.FilteredByTime++
 			continue
 		}
-		if opts.To != nil && op.Timestamp.After(*opts.To) {
+		if opts.To != nil && !op.Timestamp.Before(*opts.To) {
 			stats.Diagnostics.RecordsFiltered++
+			stats.Diagnostics.FilteredByTime++
 			continue
 		}
 
+		stats.Diagnostics.AcceptedSlowOperations++
+		if op.Truncated {
+			stats.Diagnostics.TruncatedSlowOperations++
+		}
 		visitor(op)
 	}
 }
@@ -129,80 +147,176 @@ const (
 	lineFiltered
 )
 
-func parseSlowOperationLine(line []byte, path string, lineNumber int64, stats *PassStats) (*SlowOperation, lineStatus) {
+func parseStructuredLine(line []byte, stats *PassStats) (map[string]any, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.UseNumber()
 	var raw map[string]any
-	if err := json.Unmarshal(line, &raw); err != nil {
+	if err := decoder.Decode(&raw); err != nil {
 		stats.Diagnostics.LinesMalformed++
+		return nil, false
+	}
+	stats.Diagnostics.ValidStructuredLines++
+	return raw, true
+}
+
+func parseSlowOperationLine(line []byte, path string, lineNumber int64, stats *PassStats) (*SlowOperation, lineStatus) {
+	raw, ok := parseStructuredLine(line, stats)
+	if !ok {
 		return nil, lineRejected
 	}
+	if ts, ok := parseTimestamp(raw["t"]); ok {
+		updateObservedRange(&stats.InputObservedFrom, &stats.InputObservedTo, ts)
+	}
+	return parseSlowOperationDoc(raw, path, lineNumber, stats)
+}
 
+func parseSlowOperationDoc(raw map[string]any, path string, lineNumber int64, stats *PassStats) (*SlowOperation, lineStatus) {
 	msg := asString(raw["msg"])
 	if !strings.Contains(strings.ToLower(msg), "slow") {
+		stats.Diagnostics.NonSlowStructuredLines++
 		stats.Diagnostics.RecordsRejected++
 		return nil, lineRejected
 	}
+	stats.Diagnostics.SlowQueryLines++
 
 	attr, _ := raw["attr"].(map[string]any)
 	if attr == nil {
-		stats.Diagnostics.RecordsRejected++
+		rejectSlow(stats, "missing_attr")
 		return nil, lineRejected
 	}
 
 	timestamp, ok := parseTimestamp(raw["t"])
 	if !ok {
-		stats.Diagnostics.RecordsRejected++
+		rejectSlow(stats, "missing_timestamp")
 		return nil, lineRejected
 	}
 
 	duration, ok := parseDuration(attr)
 	if !ok {
-		stats.Diagnostics.RecordsRejected++
+		rejectSlow(stats, "missing_duration")
 		return nil, lineRejected
 	}
 
 	command, _ := attr["command"].(map[string]any)
+	originatingCommand, _ := attr["originatingCommand"].(map[string]any)
 	commandName := deriveCommandName(command)
+	if commandName == "" {
+		commandName = strings.TrimSpace(asString(attr["op"]))
+	}
 	if commandName == "" {
 		commandName = strings.TrimSpace(asString(attr["type"]))
 	}
 	if commandName == "" {
-		stats.Diagnostics.RecordsRejected++
+		rejectSlow(stats, "missing_command")
 		return nil, lineRejected
 	}
 	if isExcludedCommand(commandName) {
-		stats.Diagnostics.RecordsRejected++
+		rejectSlow(stats, "excluded_command")
 		return nil, lineRejected
 	}
 
-	namespace := deriveNamespace(strings.TrimSpace(asString(attr["ns"])), commandName, command)
-	shapeKey, shapeID, shapeSource, truncated := deriveShapeIdentity(commandName, namespace, command, attr, &stats.Diagnostics)
-	planSummary := strings.TrimSpace(asString(attr["planSummary"]))
-	if planSummary == "" {
-		planSummary = "unknown"
+	info := normalizeOperation(commandName, command, originatingCommand, attr, stats)
+	if info.Operation == "" {
+		rejectSlow(stats, "unknown_operation")
+		return nil, lineRejected
+	}
+	originOperation := info.Operation
+	originCategory := info.Category
+	identityCommand := command
+	if info.Operation == "getMore" && originatingCommand != nil {
+		originName := deriveCommandName(originatingCommand)
+		originInfo := normalizeOperation(originName, originatingCommand, nil, attr, stats)
+		if originInfo.Operation != "" && originInfo.Operation != "other" && originInfo.Operation != "internal" {
+			originOperation = originInfo.Operation
+			originCategory = originInfo.Category
+			identityCommand = originatingCommand
+		}
+	}
+
+	namespace := deriveNamespace(strings.TrimSpace(asString(attr["ns"])), info.Operation, command)
+	if info.Operation == "getMore" && namespace == "<unknown>" && originatingCommand != nil {
+		namespace = deriveNamespace("", originOperation, originatingCommand)
+	}
+
+	identity, shapeKey, source, truncated := deriveShapeIdentity(originOperation, namespace, identityCommand, attr, &stats.Diagnostics)
+	redacted, redactedTruncated := buildRedactedShape(originOperation, identityCommand, &stats.Diagnostics)
+	if redacted.Command == "" {
+		redacted.Command = originOperation
+	}
+	if redactedTruncated {
+		truncated = true
+	}
+
+	planSummary := sanitizePlanSummary(asString(attr["planSummary"]))
+	planCacheKey := sanitizeBoundedString(asString(attr["planCacheKey"]), 128)
+	identity.PlanCacheKey = planCacheKey
+
+	lockWait := extractLockWaitMicros(attr["locks"])
+	if !lockWait.Valid {
+		lockWait = extractLockWaitMicros(attr["lockStats"])
 	}
 
 	op := &SlowOperation{
-		Timestamp:        timestamp,
-		Namespace:        namespace,
-		Operation:        commandName,
-		CommandName:      commandName,
-		Duration:         duration,
-		PlanSummary:      planSummary,
-		ShapeKey:         shapeKey,
-		ShapeID:          shapeID,
-		ShapeLabel:       shapeLabel(commandName, namespace, shapeID),
-		QueryHashSource:  shapeSource,
-		KeysExamined:     optionalInt64(attr["keysExamined"]),
-		DocsExamined:     optionalInt64(attr["docsExamined"]),
-		NReturned:        optionalInt64(attr["nreturned"]),
-		NumYields:        optionalInt64(attr["numYields"]),
-		HasSortStage:     asBool(attr["hasSortStage"]),
-		FromMultiPlanner: asBool(attr["fromMultiPlanner"]),
-		Truncated:        truncated || asBool(attr["truncated"]),
-		SourceFile:       path,
-		SourceLine:       lineNumber,
+		Timestamp:          timestamp,
+		Namespace:          namespace,
+		Category:           info.Category,
+		Operation:          info.Operation,
+		OriginCategory:     originCategory,
+		OriginOperation:    originOperation,
+		CommandName:        commandName,
+		Internal:           info.Internal,
+		Duration:           duration,
+		DurationMillis:     durationMillis(duration),
+		PlanSummary:        planSummary,
+		ShapeKey:           shapeKey,
+		ShapeID:            identity.ID,
+		ShapeLabel:         shapeLabel(originOperation, namespace, identity.ID),
+		QueryHashSource:    source,
+		ShapeIdentity:      identity,
+		RedactedShape:      redacted,
+		KeysExamined:       optionalInt64(attr["keysExamined"]),
+		DocsExamined:       optionalInt64(attr["docsExamined"]),
+		NReturned:          optionalInt64(attr["nreturned"]),
+		NMatched:           optionalInt64(attr["nMatched"]),
+		NModified:          optionalInt64(attr["nModified"]),
+		NInserted:          optionalInt64(attr["ninserted"]),
+		NDeleted:           optionalInt64(attr["ndeleted"]),
+		NumYields:          optionalInt64(attr["numYields"]),
+		BytesRead:          firstOptionalInt64(attr, "bytesRead", "storage.data.bytesRead"),
+		BytesWritten:       firstOptionalInt64(attr, "bytesWritten", "storage.data.bytesWritten"),
+		TimeReadingMicros:  firstOptionalInt64(attr, "timeReadingMicros", "storage.data.timeReadingMicros"),
+		TimeWritingMicros:  firstOptionalInt64(attr, "timeWritingMicros", "storage.data.timeWritingMicros"),
+		PlanningTimeMicros: firstOptionalInt64(attr, "planningTimeMicros", "planningTimeMicrosEstimate"),
+		LockWaitMicros:     lockWait,
+		CPUNanos:           firstOptionalInt64(attr, "cpuNanos"),
+		HasSortStage:       optionalBool(attr["hasSortStage"]),
+		UsedDisk:           optionalBool(attr["usedDisk"]),
+		FromMultiPlanner:   optionalBool(attr["fromMultiPlanner"]),
+		Replanned:          optionalBool(attr["replanned"]),
+		ReplanReason:       sanitizeReplanReason(asString(attr["replanReason"])),
+		PlanCacheKey:       planCacheKey,
+		QueryFramework:     sanitizeQueryFramework(asString(attr["queryFramework"])),
+		GetMoreAssociated:  info.Operation == "getMore" && originOperation != "getMore",
+		Truncated:          truncated || asBool(attr["truncated"]),
+		SourceFile:         path,
+		SourceLine:         lineNumber,
+	}
+	if op.Operation == "getMore" && !op.GetMoreAssociated {
+		stats.Diagnostics.UnassociatedGetMore++
 	}
 	return op, lineAccepted
+}
+
+func rejectSlow(stats *PassStats, reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	stats.Diagnostics.RecordsRejected++
+	stats.Diagnostics.RejectedSlowOperations++
+	if stats.Diagnostics.RejectedByReason == nil {
+		stats.Diagnostics.RejectedByReason = fixedRejectedByReasonMap()
+	}
+	stats.Diagnostics.RejectedByReason[reason]++
 }
 
 func parseTimestamp(v any) (time.Time, bool) {
@@ -239,9 +353,9 @@ func deriveCommandName(command map[string]any) string {
 	}
 	for _, key := range []string{
 		"find", "count", "distinct", "delete", "findAndModify", "update", "insert",
-		"aggregate", "bulkWrite", "getMore", "dbStats", "collStats", "listCollections",
-		"listIndexes", "dropDatabase", "create", "drop",
-		"saslStart", "saslContinue", "authenticate", "hello", "isMaster",
+		"aggregate", "bulkWrite", "getMore", "commitTransaction", "abortTransaction",
+		"dbStats", "collStats", "listCollections", "listIndexes", "dropDatabase", "create", "drop",
+		"saslStart", "saslContinue", "authenticate", "hello", "isMaster", "replSetHeartbeat", "configTerm",
 	} {
 		if _, ok := command[key]; ok {
 			return key
@@ -254,7 +368,7 @@ func deriveCommandName(command map[string]any) string {
 			continue
 		}
 		switch k {
-		case "filter", "sort", "projection", "pipeline", "updates", "deletes", "documents", "cursor", "collection":
+		case "filter", "sort", "projection", "pipeline", "updates", "deletes", "documents", "cursor", "collection", "mechanism", "comment", "lsid", "txnNumber":
 			continue
 		}
 		keys = append(keys, k)
@@ -264,6 +378,50 @@ func deriveCommandName(command map[string]any) string {
 		return strings.TrimSpace(key)
 	}
 	return ""
+}
+
+func normalizeOperation(commandName string, command, originatingCommand map[string]any, attr map[string]any, stats *PassStats) OperationInfo {
+	name := strings.TrimSpace(commandName)
+	if name == "" && command != nil {
+		name = deriveCommandName(command)
+	}
+	switch name {
+	case "find", "aggregate", "count", "distinct":
+		return OperationInfo{Category: "read", Operation: name}
+	case "insert", "update", "delete", "findAndModify", "bulkWrite":
+		return OperationInfo{Category: "write", Operation: name}
+	case "remove":
+		return OperationInfo{Category: "write", Operation: "delete"}
+	case "getMore":
+		return OperationInfo{Category: "cursor", Operation: "getMore"}
+	case "commitTransaction", "abortTransaction":
+		return OperationInfo{Category: "transaction", Operation: name}
+	case "configTerm", "replSetHeartbeat", "hello", "isMaster":
+		return OperationInfo{Category: "internal", Operation: "internal", Internal: true}
+	case "dbStats", "collStats", "listCollections", "listIndexes", "dropDatabase", "create", "drop":
+		return OperationInfo{Category: "command", Operation: "command"}
+	case "command":
+		if command != nil {
+			return normalizeOperation(deriveCommandName(command), command, originatingCommand, attr, stats)
+		}
+		return OperationInfo{Category: "command", Operation: "command"}
+	case "query":
+		return OperationInfo{Category: "read", Operation: "find"}
+	case "none", "":
+		stats.Diagnostics.UnknownOperationTypes++
+		return OperationInfo{Category: "other", Operation: "other"}
+	default:
+		if isInternalCommandName(name) {
+			return OperationInfo{Category: "internal", Operation: "internal", Internal: true}
+		}
+		stats.Diagnostics.UnknownOperationTypes++
+		return OperationInfo{Category: "other", Operation: "other"}
+	}
+}
+
+func isInternalCommandName(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "repl") || strings.Contains(lower, "heartbeat") || strings.Contains(lower, "config") || strings.HasPrefix(lower, "_")
 }
 
 func isExcludedCommand(commandName string) bool {
@@ -279,6 +437,9 @@ func deriveNamespace(ns, commandName string, command map[string]any) string {
 	ns = strings.TrimSpace(ns)
 	if ns != "" {
 		return ns
+	}
+	if command == nil {
+		return "<unknown>"
 	}
 	db := strings.TrimSpace(asString(command["$db"]))
 	if db == "" {
@@ -299,7 +460,7 @@ func deriveNamespace(ns, commandName string, command map[string]any) string {
 		if collection == "" {
 			return "<unknown>"
 		}
-	case "dbStats", "dropDatabase":
+	case "dbStats", "dropDatabase", "command":
 		return "db." + db
 	}
 
@@ -314,7 +475,7 @@ func deriveNamespace(ns, commandName string, command map[string]any) string {
 
 func isDatabaseScopedCommand(commandName string, command map[string]any) bool {
 	switch commandName {
-	case "dbStats", "dropDatabase", "listCollections":
+	case "dbStats", "dropDatabase", "listCollections", "command":
 		return true
 	case "aggregate":
 		return strings.TrimSpace(asString(command["aggregate"])) == "1"
@@ -323,39 +484,229 @@ func isDatabaseScopedCommand(commandName string, command map[string]any) bool {
 	}
 }
 
-func deriveShapeIdentity(commandName, namespace string, command, attr map[string]any, diagnostics *Diagnostics) (shapeKey, shapeID, source string, truncated bool) {
+func deriveShapeIdentity(operation, namespace string, command, attr map[string]any, diagnostics *Diagnostics) (ShapeIdentity, string, string, bool) {
 	for _, candidate := range []struct {
 		key    string
 		source string
 	}{
-		{key: "queryHash", source: "server_queryHash"},
+		{key: "queryShapeHash", source: "server_queryShapeHash"},
 		{key: "planCacheShapeHash", source: "server_planCacheShapeHash"},
+		{key: "queryHash", source: "server_queryHash"},
 	} {
-		if value := strings.TrimSpace(asString(attr[candidate.key])); value != "" {
-			return value, value, candidate.source, false
+		if value := sanitizeBoundedString(asString(attr[candidate.key]), 128); value != "" {
+			identity := ShapeIdentity{ID: value, Source: candidate.source}
+			return identity, analysisShapeKey(namespace, operation, identity), candidate.source, false
 		}
 	}
 
-	canonical, truncated := canonicalizeShape(commandName, namespace, command, diagnostics)
-	shapeKey = stableHash(canonical)
-	return shapeKey, "", "missing", truncated
+	canonical, truncated := canonicalizeShape(operation, namespace, command, diagnostics)
+	id := stableHash(canonical)
+	source := "local_canonical"
+	if truncated {
+		source = "fallback_truncated"
+		diagnostics.CanonicalizationFailures++
+	}
+	diagnostics.CanonicalizationFallbacks++
+	identity := ShapeIdentity{ID: id, Source: source}
+	return identity, analysisShapeKey(namespace, operation, identity), source, truncated
 }
 
-func canonicalizeShape(commandName, namespace string, command map[string]any, diagnostics *Diagnostics) (string, bool) {
+func canonicalizeShape(operation, namespace string, command map[string]any, diagnostics *Diagnostics) (string, bool) {
 	state := canonicalState{}
 	value, truncated := state.normalizeCommand(command)
 	if truncated {
 		diagnostics.ShapeCanonicalizationTruncated++
 		fallback := state.fallbackCommandSignature(command)
-		return commandName + "|" + namespace + "|" + fallback + "|truncated-shape", true
+		return operation + "|" + namespace + "|" + fallback + "|truncated-shape", true
 	}
-	return commandName + "|" + namespace + "|" + value, false
+	return operation + "|" + namespace + "|" + value, false
+}
+
+func buildRedactedShape(operation string, command map[string]any, diagnostics *Diagnostics) (RedactedShape, bool) {
+	if command == nil {
+		return RedactedShape{Command: operation}, false
+	}
+	shape := RedactedShape{Command: operation}
+	var truncated bool
+	if v, ok := command["filter"]; ok {
+		shape.Filter, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["q"]; ok && shape.Filter == nil {
+		shape.Filter, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["sort"]; ok {
+		shape.Sort, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["projection"]; ok {
+		shape.ProjectionFields = projectionFields(v)
+	}
+	if v, ok := command["pipeline"]; ok {
+		shape.Pipeline, truncated = redactValue(v, 0)
+		shape.PipelineStages = pipelineStages(v)
+	}
+	if v, ok := command["updates"]; ok {
+		shape.Update, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["u"]; ok && shape.Update == nil {
+		shape.Update, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["deletes"]; ok && shape.Filter == nil {
+		shape.Filter, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["hint"]; ok {
+		shape.Hint, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["collation"]; ok {
+		shape.Collation, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["$readPreference"]; ok {
+		shape.ReadPreference, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["readConcern"]; ok {
+		shape.ReadConcern, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["writeConcern"]; ok {
+		shape.WriteConcern, truncated = redactValue(v, 0)
+	}
+	if v, ok := command["allowDiskUse"]; ok {
+		b := asBool(v)
+		shape.AllowDiskUse = &b
+	}
+	if truncated {
+		diagnostics.ShapeCanonicalizationTruncated++
+	}
+	return shape, truncated
+}
+
+func redactValue(v any, depth int) (any, bool) {
+	if depth > 32 {
+		return "?truncated", true
+	}
+	switch value := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			if isVolatileCommandKey(key) {
+				continue
+			}
+			keys = append(keys, sanitizeBoundedString(key, 120))
+		}
+		sort.Strings(keys)
+		out := map[string]any{}
+		truncated := false
+		if len(keys) > 1000 {
+			keys = keys[:1000]
+			truncated = true
+		}
+		for _, key := range keys {
+			child, childTruncated := redactValue(value[key], depth+1)
+			out[key] = child
+			truncated = truncated || childTruncated
+		}
+		return out, truncated
+	case []any:
+		if len(value) == 0 {
+			return []any{}, false
+		}
+		if scalarOnlyArray(value) {
+			return []any{typeMarker(value[0])}, false
+		}
+		limit := len(value)
+		truncated := false
+		if limit > 1000 {
+			limit = 1000
+			truncated = true
+		}
+		out := make([]any, 0, limit)
+		for i := 0; i < limit; i++ {
+			child, childTruncated := redactValue(value[i], depth+1)
+			out = append(out, child)
+			truncated = truncated || childTruncated
+		}
+		return out, truncated
+	default:
+		return typeMarker(v), false
+	}
+}
+
+func scalarOnlyArray(values []any) bool {
+	for _, value := range values {
+		switch value.(type) {
+		case map[string]any, []any:
+			return false
+		}
+	}
+	return true
+}
+
+func typeMarker(v any) string {
+	switch value := v.(type) {
+	case nil:
+		return "?null"
+	case bool:
+		return "?bool"
+	case string:
+		if strings.HasPrefix(value, "ObjectId(") {
+			return "?objectId"
+		}
+		if _, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return "?date"
+		}
+		return "?string"
+	case json.Number, float64, int, int64:
+		return "?number"
+	case map[string]any:
+		return "?object"
+	case []any:
+		return "?array"
+	default:
+		return "?value"
+	}
+}
+
+func projectionFields(v any) []string {
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	fields := make([]string, 0, len(obj))
+	for key := range obj {
+		fields = append(fields, sanitizeBoundedString(key, 120))
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+func pipelineStages(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	stages := make([]string, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(obj))
+		for key := range obj {
+			keys = append(keys, sanitizeBoundedString(key, 80))
+		}
+		sort.Strings(keys)
+		stages = append(stages, keys...)
+		if len(stages) >= 100 {
+			break
+		}
+	}
+	return stages
 }
 
 func asString(v any) string {
 	switch value := v.(type) {
 	case string:
 		return value
+	case json.Number:
+		return value.String()
 	case fmt.Stringer:
 		return value.String()
 	default:
@@ -405,12 +756,148 @@ func asBool(v any) bool {
 	}
 }
 
+func fixedRejectedByReasonMap() map[string]int64 {
+	reasons := []string{"missing_attr", "missing_timestamp", "missing_duration", "missing_command", "excluded_command", "unknown_operation", "unknown"}
+	out := make(map[string]int64, len(reasons))
+	for _, reason := range reasons {
+		out[reason] = 0
+	}
+	return out
+}
+
+func sanitizePlanSummary(value string) string {
+	value = sanitizeBoundedString(value, 240)
+	if value == "" {
+		return "unknown"
+	}
+	allowed := map[string]struct{}{
+		"COLLSCAN": {}, "IXSCAN": {}, "EXPRESS_IXSCAN": {}, "IDHACK": {}, "EOF": {},
+		"COUNT": {}, "COUNT_SCAN": {}, "DISTINCT_SCAN": {}, "SUBPLAN": {}, "FETCH": {},
+		"UPDATE": {}, "DELETE": {}, "INSERT": {}, "BULK_WRITE": {}, "UNKNOWN": {},
+	}
+	for _, token := range strings.FieldsFunc(value, func(r rune) bool {
+		return !(r == 95 || r >= 48 && r <= 57 || r >= 65 && r <= 90 || r >= 97 && r <= 122)
+	}) {
+		upper := strings.ToUpper(token)
+		if _, ok := allowed[upper]; ok {
+			if upper == "UNKNOWN" {
+				return "unknown"
+			}
+			return upper
+		}
+	}
+	return "?string"
+}
+
+func sanitizeQueryFramework(value string) string {
+	value = sanitizeBoundedString(value, 40)
+	if value == "" {
+		return ""
+	}
+	switch strings.ToLower(value) {
+	case "classic", "sbe", "cqf", "bonsai":
+		return strings.ToLower(value)
+	default:
+		return "?string"
+	}
+}
+
+func sanitizeReplanReason(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return "?string"
+}
+
+func optionalBool(v any) OptionalBool {
+	switch value := v.(type) {
+	case bool:
+		return OptionalBool{Value: value, Valid: true}
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if strings.EqualFold(trimmed, "true") {
+			return OptionalBool{Value: true, Valid: true}
+		}
+		if strings.EqualFold(trimmed, "false") {
+			return OptionalBool{Value: false, Valid: true}
+		}
+	}
+	return OptionalBool{}
+}
+
 func optionalInt64(v any) OptionalInt64 {
 	value, ok := asInt64(v)
 	if !ok {
 		return OptionalInt64{}
 	}
 	return OptionalInt64{Value: value, Valid: true}
+}
+
+func firstOptionalInt64(root map[string]any, paths ...string) OptionalInt64 {
+	for _, path := range paths {
+		if value, ok := valueAtPath(root, path); ok {
+			if opt := optionalInt64(value); opt.Valid {
+				return opt
+			}
+		}
+	}
+	return OptionalInt64{}
+}
+
+func valueAtPath(root map[string]any, path string) (any, bool) {
+	parts := strings.Split(path, ".")
+	var current any = root
+	for _, part := range parts {
+		obj, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = obj[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func extractLockWaitMicros(v any) OptionalInt64 {
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return OptionalInt64{}
+	}
+	var total int64
+	var found bool
+	var walk func(any)
+	walk = func(value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				if key == "timeAcquiringMicros" {
+					switch modes := child.(type) {
+					case map[string]any:
+						for _, modeValue := range modes {
+							if n, ok := asInt64(modeValue); ok {
+								total += n
+								found = true
+							}
+						}
+					default:
+						if n, ok := asInt64(child); ok {
+							total += n
+							found = true
+						}
+					}
+					continue
+				}
+				walk(child)
+			}
+		}
+	}
+	walk(obj)
+	if !found {
+		return OptionalInt64{}
+	}
+	return OptionalInt64{Value: total, Valid: true}
 }
 
 type canonicalState struct {
@@ -420,10 +907,10 @@ type canonicalState struct {
 }
 
 const (
-	canonicalMaxDepth   = 10
-	canonicalMaxObjects = 256
-	canonicalMaxArrays  = 256
-	canonicalMaxOutput  = 1 << 16
+	canonicalMaxDepth   = 32
+	canonicalMaxObjects = 1000
+	canonicalMaxArrays  = 1000
+	canonicalMaxOutput  = 1 << 20
 )
 
 func (s *canonicalState) normalizeCommand(command map[string]any) (string, bool) {
@@ -443,6 +930,9 @@ func (s *canonicalState) normalizeValue(v any, depth int) (string, bool) {
 		}
 		keys := make([]string, 0, len(value))
 		for key := range value {
+			if isVolatileCommandKey(key) {
+				continue
+			}
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
@@ -464,6 +954,19 @@ func (s *canonicalState) normalizeValue(v any, depth int) (string, bool) {
 		if s.arrays > canonicalMaxArrays {
 			return "", true
 		}
+		if len(value) == 0 {
+			if s.addOutput(2) {
+				return "", true
+			}
+			return "[]", false
+		}
+		if scalarOnlyArray(value) {
+			out := "[" + typeMarker(value[0]) + "]"
+			if s.addOutput(len(out)) {
+				return "", true
+			}
+			return out, false
+		}
 		parts := make([]string, 0, len(value))
 		for _, item := range value {
 			child, truncated := s.normalizeValue(item, depth+1)
@@ -477,26 +980,17 @@ func (s *canonicalState) normalizeValue(v any, depth int) (string, bool) {
 			return "", true
 		}
 		return out, false
-	case string:
-		if s.addOutput(1) {
+	case string, bool, json.Number, float64, int, int64, nil:
+		marker := typeMarker(value)
+		if s.addOutput(len(marker)) {
 			return "", true
 		}
-		return "?", false
-	case bool:
-		if s.addOutput(1) {
-			return "", true
-		}
-		return "?", false
-	case nil:
-		if s.addOutput(4) {
-			return "", true
-		}
-		return "null", false
+		return marker, false
 	default:
-		if s.addOutput(1) {
+		if s.addOutput(6) {
 			return "", true
 		}
-		return "?", false
+		return "?value", false
 	}
 }
 
@@ -511,6 +1005,9 @@ func (s *canonicalState) fallbackCommandSignature(command map[string]any) string
 	}
 	keys := make([]string, 0, len(command))
 	for key := range command {
+		if isVolatileCommandKey(key) {
+			continue
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -526,6 +1023,9 @@ func firstLevelSignature(v any) string {
 	case map[string]any:
 		keys := make([]string, 0, len(value))
 		for key := range value {
+			if isVolatileCommandKey(key) {
+				continue
+			}
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
@@ -565,5 +1065,14 @@ func valueKind(v any) string {
 		return "null"
 	default:
 		return "scalar"
+	}
+}
+
+func isVolatileCommandKey(key string) bool {
+	switch key {
+	case "lsid", "txnNumber", "$clusterTime", "operationTime", "shardVersion", "databaseVersion", "clientOperationKey", "comment", "signature", "$db":
+		return true
+	default:
+		return false
 	}
 }

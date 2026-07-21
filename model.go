@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -12,6 +13,7 @@ import (
 const (
 	maxLogicalLineBytes = 16 << 20
 	schemaVersion       = 1
+	analysisSchema      = 2
 )
 
 type OptionalInt64 struct {
@@ -19,38 +21,110 @@ type OptionalInt64 struct {
 	Valid bool
 }
 
+type OptionalBool struct {
+	Value bool
+	Valid bool
+}
+
+type ShapeIdentity struct {
+	ID           string `json:"id"`
+	Source       string `json:"source"`
+	PlanCacheKey string `json:"planCacheKey,omitempty"`
+}
+
+type OperationInfo struct {
+	Category  string `json:"category"`
+	Operation string `json:"operation"`
+	Internal  bool   `json:"internal"`
+}
+
+type RedactedShape struct {
+	Command          string         `json:"command"`
+	Filter           any            `json:"filter,omitempty"`
+	Sort             any            `json:"sort,omitempty"`
+	ProjectionFields []string       `json:"projectionFields,omitempty"`
+	Pipeline         any            `json:"pipeline,omitempty"`
+	PipelineStages   []string       `json:"pipelineStages,omitempty"`
+	Update           any            `json:"update,omitempty"`
+	Hint             any            `json:"hint,omitempty"`
+	Collation        any            `json:"collation,omitempty"`
+	ReadPreference   any            `json:"readPreference,omitempty"`
+	ReadConcern      any            `json:"readConcern,omitempty"`
+	WriteConcern     any            `json:"writeConcern,omitempty"`
+	AllowDiskUse     *bool          `json:"allowDiskUse,omitempty"`
+	Extra            map[string]any `json:"extra,omitempty"`
+}
+
 type SlowOperation struct {
-	Timestamp        time.Time
-	Namespace        string
-	Operation        string
-	CommandName      string
-	Duration         time.Duration
-	PlanSummary      string
-	ShapeKey         string
-	ShapeID          string
-	ShapeLabel       string
-	QueryHashSource  string
-	KeysExamined     OptionalInt64
-	DocsExamined     OptionalInt64
-	NReturned        OptionalInt64
-	NumYields        OptionalInt64
-	HasSortStage     bool
-	FromMultiPlanner bool
-	Truncated        bool
-	SourceFile       string
-	SourceLine       int64
+	Timestamp          time.Time
+	Namespace          string
+	Category           string
+	Operation          string
+	OriginCategory     string
+	OriginOperation    string
+	CommandName        string
+	Internal           bool
+	Duration           time.Duration
+	DurationMillis     int64
+	PlanSummary        string
+	ShapeKey           string
+	ShapeID            string
+	ShapeLabel         string
+	QueryHashSource    string
+	ShapeIdentity      ShapeIdentity
+	RedactedShape      RedactedShape
+	KeysExamined       OptionalInt64
+	DocsExamined       OptionalInt64
+	NReturned          OptionalInt64
+	NMatched           OptionalInt64
+	NModified          OptionalInt64
+	NInserted          OptionalInt64
+	NDeleted           OptionalInt64
+	NumYields          OptionalInt64
+	BytesRead          OptionalInt64
+	BytesWritten       OptionalInt64
+	TimeReadingMicros  OptionalInt64
+	TimeWritingMicros  OptionalInt64
+	PlanningTimeMicros OptionalInt64
+	LockWaitMicros     OptionalInt64
+	CPUNanos           OptionalInt64
+	HasSortStage       OptionalBool
+	UsedDisk           OptionalBool
+	FromMultiPlanner   OptionalBool
+	Replanned          OptionalBool
+	ReplanReason       string
+	PlanCacheKey       string
+	QueryFramework     string
+	GetMoreAssociated  bool
+	Truncated          bool
+	SourceFile         string
+	SourceLine         int64
 }
 
 type Diagnostics struct {
-	InputStatus                    string `json:"inputStatus"`
-	FilesDiscovered                int    `json:"filesDiscovered"`
-	FilesRead                      int    `json:"filesRead"`
-	FilesFailed                    int    `json:"filesFailed"`
-	LinesRead                      int64  `json:"linesRead"`
-	LinesMalformed                 int64  `json:"linesMalformed"`
-	RecordsRejected                int64  `json:"recordsRejected"`
-	RecordsFiltered                int64  `json:"recordsFiltered"`
-	ShapeCanonicalizationTruncated int64  `json:"shapeCanonicalizationTruncated"`
+	InputStatus                    string           `json:"inputStatus"`
+	FilesDiscovered                int              `json:"filesDiscovered"`
+	FilesRead                      int              `json:"filesRead"`
+	FilesFailed                    int              `json:"filesFailed"`
+	LinesRead                      int64            `json:"linesRead"`
+	LinesMalformed                 int64            `json:"linesMalformed"`
+	RecordsRejected                int64            `json:"recordsRejected"`
+	RecordsFiltered                int64            `json:"recordsFiltered"`
+	ShapeCanonicalizationTruncated int64            `json:"shapeCanonicalizationTruncated"`
+	ValidStructuredLines           int64            `json:"validStructuredLines,omitempty"`
+	NonSlowStructuredLines         int64            `json:"nonSlowStructuredLines,omitempty"`
+	SlowQueryLines                 int64            `json:"slowQueryLines,omitempty"`
+	AcceptedSlowOperations         int64            `json:"acceptedSlowOperations,omitempty"`
+	FilteredByTime                 int64            `json:"filteredByTime,omitempty"`
+	FilteredByDuration             int64            `json:"filteredByDuration,omitempty"`
+	RejectedSlowOperations         int64            `json:"rejectedSlowOperations,omitempty"`
+	RejectedByReason               map[string]int64 `json:"rejectedByReason,omitempty"`
+	TruncatedSlowOperations        int64            `json:"truncatedSlowOperations,omitempty"`
+	CanonicalizationFallbacks      int64            `json:"canonicalizationFallbacks,omitempty"`
+	CanonicalizationFailures       int64            `json:"canonicalizationFailures,omitempty"`
+	UnassociatedGetMore            int64            `json:"unassociatedGetMore,omitempty"`
+	PartialInput                   bool             `json:"partialInput,omitempty"`
+	UnknownOperationTypes          int64            `json:"unknownOperationTypes,omitempty"`
 }
 
 type FileFailure struct {
@@ -59,13 +133,25 @@ type FileFailure struct {
 }
 
 type PassStats struct {
-	Diagnostics Diagnostics
-	Failures    []FileFailure
+	Diagnostics       Diagnostics
+	Failures          []FileFailure
+	InputObservedFrom *time.Time
+	InputObservedTo   *time.Time
 }
 
 type Range struct {
 	From *time.Time `json:"from"`
 	To   *time.Time `json:"to"`
+}
+
+func (r Range) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		From *string `json:"from"`
+		To   *string `json:"to"`
+	}{
+		From: formatJSONTimePtr(r.From),
+		To:   formatJSONTimePtr(r.To),
+	})
 }
 
 type DurationHistogram struct {
@@ -84,6 +170,41 @@ type LatencySummary struct {
 	P99         *int64   `json:"p99"`
 	Max         *int64   `json:"max"`
 	Approximate bool     `json:"approximate"`
+}
+
+type OptionalMetricAggregate struct {
+	PresentCount int64    `json:"presentCount"`
+	Sum          int64    `json:"sum"`
+	Avg          *float64 `json:"avg"`
+	Max          *int64   `json:"max"`
+}
+
+type metricAggState struct {
+	present int64
+	sum     int64
+	max     int64
+}
+
+func (m *metricAggState) Add(v OptionalInt64) {
+	if !v.Valid {
+		return
+	}
+	if m.present == 0 || v.Value > m.max {
+		m.max = v.Value
+	}
+	m.present++
+	m.sum += v.Value
+}
+
+func (m metricAggState) JSON() OptionalMetricAggregate {
+	out := OptionalMetricAggregate{PresentCount: m.present, Sum: m.sum}
+	if m.present > 0 {
+		avg := float64(m.sum) / float64(m.present)
+		max := m.max
+		out.Avg = &avg
+		out.Max = &max
+	}
+	return out
 }
 
 func (h *DurationHistogram) Add(d time.Duration) {
@@ -106,6 +227,10 @@ func (h *DurationHistogram) Add(d time.Duration) {
 
 func (h *DurationHistogram) Count() uint64 {
 	return h.totalCount
+}
+
+func (h *DurationHistogram) TotalMs() int64 {
+	return int64(h.totalMs)
 }
 
 func (h *DurationHistogram) Summary(includeP99 bool) LatencySummary {
@@ -163,10 +288,10 @@ func durationMillis(d time.Duration) int64 {
 }
 
 func shapeLabel(op, ns, shapeID string) string {
-	if shapeID == "" {
-		return fmt.Sprintf("%s:%s#null", op, ns)
-	}
 	trimmed := shapeID
+	if trimmed == "" {
+		trimmed = stableHash(op, ns, "missing-shape")
+	}
 	if len(trimmed) > 12 {
 		trimmed = trimmed[:12]
 	}
@@ -176,4 +301,35 @@ func shapeLabel(op, ns, shapeID string) string {
 func stableHash(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
+}
+
+func analysisShapeKey(namespace, operation string, identity ShapeIdentity) string {
+	return stableHash(namespace, operation, identity.Source, identity.ID)
+}
+
+func formatJSONTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func formatJSONTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	value := formatJSONTime(*t)
+	return &value
+}
+
+func sanitizeBoundedString(value string, max int) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= max {
+			break
+		}
+	}
+	return b.String()
 }

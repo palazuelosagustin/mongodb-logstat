@@ -22,6 +22,10 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
+	if cfg.Report == "summary" {
+		fmt.Fprintln(stderr, "warning: --report summary is deprecated; use timeline, queries, or analysis")
+	}
+
 	report, exitCode, err := Execute(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

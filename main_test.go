@@ -216,7 +216,7 @@ func TestNoMatchJSONContracts(t *testing.T) {
 func TestTruncatedCanonicalizationFallback(t *testing.T) {
 	deep := map[string]any{}
 	current := deep
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 40; i++ {
 		next := map[string]any{}
 		current["x"] = next
 		current = next
@@ -230,17 +230,17 @@ func TestTruncatedCanonicalizationFallback(t *testing.T) {
 	if status != lineAccepted {
 		t.Fatalf("status=%v", status)
 	}
-	if op.QueryHashSource != "missing" {
-		t.Fatalf("source=%q want missing", op.QueryHashSource)
+	if op.QueryHashSource != "fallback_truncated" {
+		t.Fatalf("source=%q want fallback_truncated", op.QueryHashSource)
 	}
-	if op.ShapeID != "" {
-		t.Fatalf("shapeId=%q want empty", op.ShapeID)
+	if op.ShapeID == "" {
+		t.Fatalf("shapeId should be a deterministic fallback hash")
 	}
 	if !op.Truncated {
 		t.Fatalf("truncated=%t want true", op.Truncated)
 	}
-	if stats.Diagnostics.ShapeCanonicalizationTruncated != 1 {
-		t.Fatalf("truncatedCount=%d want 1", stats.Diagnostics.ShapeCanonicalizationTruncated)
+	if stats.Diagnostics.ShapeCanonicalizationTruncated < 1 {
+		t.Fatalf("truncatedCount=%d want at least 1", stats.Diagnostics.ShapeCanonicalizationTruncated)
 	}
 }
 
@@ -297,14 +297,14 @@ func TestQueriesTwoPassTopNAndLatency(t *testing.T) {
 		t.Fatalf("rows=%d want 1", len(report.Rows))
 	}
 	row := report.Rows[0]
-	if row.ShapeID != nil {
-		t.Fatalf("shapeId=%v want nil", *row.ShapeID)
+	if row.ShapeID == nil || *row.ShapeID == "" {
+		t.Fatalf("shapeId should be a deterministic local hash")
 	}
-	if row.Label != "find:shop.orders#null" {
-		t.Fatalf("label=%q want find:shop.orders#null", row.Label)
+	if strings.Contains(row.Label, "#null") || !strings.HasPrefix(row.Label, "find:shop.orders#") {
+		t.Fatalf("label=%q should be a non-null find shape label", row.Label)
 	}
-	if row.SampleLine != "mongo.log:1" {
-		t.Fatalf("sampleLine=%q want mongo.log:1", row.SampleLine)
+	if row.SampleLine != "mongo.log:3" {
+		t.Fatalf("sampleLine=%q want worst sample mongo.log:3", row.SampleLine)
 	}
 	if row.Count != 3 {
 		t.Fatalf("count=%d want 3", row.Count)
@@ -335,6 +335,47 @@ func TestSummaryRateSemantics(t *testing.T) {
 	report = computeSummary([]string{path}, nil, Config{Top: 10, From: &from, To: &to})
 	if report.OpsPerMinute != 0.2 {
 		t.Fatalf("opsPerMinute=%v want 0.2", report.OpsPerMinute)
+	}
+}
+
+func TestInternalCommandsNormalizeToInternal(t *testing.T) {
+	line := slowLineCustom("2026-07-17T10:00:00Z", map[string]any{
+		"type":           "configTerm",
+		"durationMillis": 166,
+	})
+	op, status := parseLineForTest(t, line)
+	if status != lineAccepted {
+		t.Fatalf("status=%v", status)
+	}
+	if op.Operation != "internal" || op.Category != "internal" || !op.Internal {
+		t.Fatalf("operation=%s category=%s internal=%t", op.Operation, op.Category, op.Internal)
+	}
+}
+
+func TestAnalysisReportSchemaV2NoRawValues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	line := slowLineWithFilter("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, map[string]any{"secret": "do-not-leak"})
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := Execute(Config{Report: "analysis", Bucket: 30 * time.Minute, Top: 10, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000, Inputs: []string{path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "do-not-leak") {
+		t.Fatalf("analysis leaked raw predicate value: %s", out)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		t.Fatal(err)
+	}
+	if int(body["schemaVersion"].(float64)) != 2 || body["report"] != "analysis" {
+		t.Fatalf("unexpected analysis header: %+v", body)
+	}
+	shapes := body["queryShapes"].([]any)
+	if len(shapes) != 1 {
+		t.Fatalf("queryShapes=%d want 1", len(shapes))
 	}
 }
 
@@ -408,4 +449,244 @@ func TestParseCLIAllowsFlagsAfterInputs(t *testing.T) {
 	if len(cfg.Inputs) != 1 || cfg.Inputs[0] != "/tmp/mongo.log" {
 		t.Fatalf("inputs=%v want [/tmp/mongo.log]", cfg.Inputs)
 	}
+}
+
+func TestAnalysisDiagnosticsAccountingAndSchemaFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	nonSlow := `{"t":{"$date":"2026-07-17T10:00:00Z"},"msg":"Connection accepted","attr":{}}`
+	accepted := slowLine("2026-07-17T10:01:00Z", "find", "shop", "orders", 100, nil)
+	rejected := slowLineCustom("2026-07-17T10:02:00Z", map[string]any{"type": "command", "command": map[string]any{"find": "orders", "$db": "shop"}})
+	content := strings.Join([]string{nonSlow, accepted, rejected, "{"}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body, raw := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: time.Hour, Top: 10, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	if strings.Contains(raw, "countsByNamespace") || strings.Contains(raw, "indicatorCounts") || strings.Contains(raw, `"plans"`) {
+		t.Fatalf("analysis emitted removed v2 field: %s", raw)
+	}
+	d := body["diagnostics"].(map[string]any)
+	if got := int64(d["validStructuredLines"].(float64)); got != 3 {
+		t.Fatalf("validStructuredLines=%d want 3", got)
+	}
+	if got := int64(d["nonSlowStructuredLines"].(float64)); got != 1 {
+		t.Fatalf("nonSlowStructuredLines=%d want 1", got)
+	}
+	if got := int64(d["slowQueryLines"].(float64)); got != 2 {
+		t.Fatalf("slowQueryLines=%d want 2", got)
+	}
+	if got := int64(d["acceptedSlowOperations"].(float64)); got != 1 {
+		t.Fatalf("acceptedSlowOperations=%d want 1", got)
+	}
+	if got := int64(d["rejectedSlowOperations"].(float64)); got != 1 {
+		t.Fatalf("rejectedSlowOperations=%d want 1", got)
+	}
+	if got := int64(d["malformedLines"].(float64)); got != 1 {
+		t.Fatalf("malformedLines=%d want 1", got)
+	}
+	reasons := d["rejectedByReason"].(map[string]any)
+	if got := int64(reasons["missing_duration"].(float64)); got != 1 {
+		t.Fatalf("missing_duration=%d want 1", got)
+	}
+}
+
+func TestAnalysisRateUsesAnalysisDuration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil),
+		slowLine("2026-07-17T10:10:00Z", "find", "shop", "orders", 100, nil),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: time.Hour, Top: 10, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	ranges := body["ranges"].(map[string]any)
+	if got := int64(ranges["analysisDurationSeconds"].(float64)); got != 600 {
+		t.Fatalf("analysisDurationSeconds=%d want 600", got)
+	}
+	rate := body["global"].(map[string]any)["rates"].(map[string]any)["overAnalysisRange"].(map[string]any)
+	if got := int64(rate["denominatorSeconds"].(float64)); got != 600 {
+		t.Fatalf("denominatorSeconds=%d want 600", got)
+	}
+	if got := rate["loggedSlowOperationsPerMinute"].(float64); got < 0.199999999 || got > 0.200000001 {
+		t.Fatalf("loggedSlowOperationsPerMinute=%v want 0.2", got)
+	}
+}
+
+func TestAnalysisUTCSerialization(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		slowLine("2026-07-17T10:00:00-07:00", "find", "shop", "orders", 100, nil),
+		slowLine("2026-07-17T18:00:00+01:00", "find", "shop", "orders", 200, nil),
+		slowLine("2026-07-17T17:30:00Z", "find", "shop", "orders", 300, nil),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, raw := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: 30 * time.Minute, Top: 10, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	if strings.Contains(raw, "-07:00") || strings.Contains(raw, "+01:00") {
+		t.Fatalf("analysis preserved source timezone offset: %s", raw)
+	}
+	for _, want := range []string{"2026-07-17T17:00:00Z", "2026-07-17T17:30:00Z"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("analysis missing UTC timestamp %s in %s", want, raw)
+		}
+	}
+}
+
+func TestAnalysisShapeKeysAreGlobalAndReferencesAreEmittedOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		slowLineCustom("2026-07-17T10:00:00Z", map[string]any{"type": "command", "command": map[string]any{"find": "orders", "$db": "shop"}, "durationMillis": 1000, "queryHash": "samehash", "planSummary": "IXSCAN"}),
+		slowLineCustom("2026-07-17T10:30:00Z", map[string]any{"type": "command", "command": map[string]any{"find": "orders", "$db": "audit"}, "durationMillis": 900, "queryHash": "samehash", "planSummary": "IXSCAN"}),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	all, _ := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: 30 * time.Minute, Top: 0, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	allShapes := all["queryShapes"].([]any)
+	if len(allShapes) != 2 {
+		t.Fatalf("queryShapes=%d want 2", len(allShapes))
+	}
+	keys := map[string]bool{}
+	for _, item := range allShapes {
+		shape := item.(map[string]any)
+		identity := shape["identity"].(map[string]any)
+		if identity["id"] != "samehash" {
+			t.Fatalf("identity.id=%v want samehash", identity["id"])
+		}
+		keys[shape["shapeKey"].(string)] = true
+	}
+	if len(keys) != 2 {
+		t.Fatalf("shape keys are not globally unique: %+v", allShapes)
+	}
+
+	top, _ := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: 30 * time.Minute, Top: 1, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	emitted := map[string]bool{}
+	for _, item := range top["queryShapes"].([]any) {
+		emitted[item.(map[string]any)["shapeKey"].(string)] = true
+	}
+	assertAnalysisReferencesResolve(t, top, emitted)
+	omitted := top["omitted"].(map[string]any)
+	if got := int(omitted["queryShapes"].(float64)); got != 1 {
+		t.Fatalf("omitted.queryShapes=%d want 1", got)
+	}
+}
+
+func TestAnalysisPlanEvidenceSeparatesUnknown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		slowLineWithFilter("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, map[string]any{"a": 1}),
+		slowLineCustom("2026-07-17T10:01:00Z", map[string]any{"type": "command", "command": map[string]any{"find": "orders", "$db": "shop", "filter": map[string]any{"a": 2}}, "durationMillis": 100}),
+		slowLineCustom("2026-07-17T10:02:00Z", map[string]any{"type": "command", "command": map[string]any{"find": "orders", "$db": "shop", "filter": map[string]any{"a": 3}}, "durationMillis": 100, "planSummary": "COLLSCAN", "planCacheKey": "safePlanKey"}),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: time.Hour, Top: 10, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	shape := body["queryShapes"].([]any)[0].(map[string]any)
+	evidence := shape["planEvidence"].(map[string]any)
+	if got := int(evidence["unknownPlanCount"].(float64)); got != 1 {
+		t.Fatalf("unknownPlanCount=%d want 1", got)
+	}
+	variants := evidence["variants"].([]any)
+	if len(variants) != 2 {
+		t.Fatalf("variants=%d want 2: %+v", len(variants), variants)
+	}
+	indicators := stringSliceFromAny(shape["indicators"])
+	if !containsString(indicators, "multiple_plan_variants_observed") {
+		t.Fatalf("missing multiple_plan_variants_observed in %+v", indicators)
+	}
+}
+
+func TestAnalysisGetMoreOriginatingSemantics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		slowLineCustom("2026-07-17T10:00:00Z", map[string]any{"type": "command", "command": map[string]any{"find": "orders", "$db": "shop"}, "durationMillis": 100, "planSummary": "IXSCAN"}),
+		slowLineCustom("2026-07-17T10:01:00Z", map[string]any{"type": "command", "command": map[string]any{"getMore": 123, "collection": "orders", "$db": "shop"}, "originatingCommand": map[string]any{"find": "orders", "$db": "shop"}, "durationMillis": 200, "planSummary": "IXSCAN"}),
+		slowLineCustom("2026-07-17T10:02:00Z", map[string]any{"type": "command", "command": map[string]any{"getMore": 456, "collection": "events", "$db": "audit"}, "durationMillis": 300, "planSummary": "IXSCAN"}),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: time.Hour, Top: 10, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	var foundAssociated bool
+	var foundUnassociated bool
+	for _, item := range body["queryShapes"].([]any) {
+		shape := item.(map[string]any)
+		ops := shape["observedOperations"].(map[string]any)
+		switch shape["getMoreAssociation"] {
+		case "originatingCommand":
+			foundAssociated = true
+			if shape["operation"] != "find" || shape["category"] != "read" {
+				t.Fatalf("associated shape operation/category=%v/%v want find/read", shape["operation"], shape["category"])
+			}
+			if int(ops["find"].(float64)) != 1 || int(ops["getMore"].(float64)) != 1 {
+				t.Fatalf("associated observedOperations=%+v want find/getMore", ops)
+			}
+		case "unavailable":
+			foundUnassociated = true
+			if shape["operation"] != "getMore" || shape["category"] != "cursor" {
+				t.Fatalf("unassociated shape operation/category=%v/%v want getMore/cursor", shape["operation"], shape["category"])
+			}
+		}
+	}
+	if !foundAssociated || !foundUnassociated {
+		t.Fatalf("foundAssociated=%t foundUnassociated=%t", foundAssociated, foundUnassociated)
+	}
+}
+
+func runAnalysisForTest(t *testing.T, path string, cfg Config) (map[string]any, string) {
+	t.Helper()
+	cfg.Inputs = []string{path}
+	out, _, err := Execute(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body, out
+}
+
+func assertAnalysisReferencesResolve(t *testing.T, body map[string]any, emitted map[string]bool) {
+	t.Helper()
+	check := func(keys []any) {
+		for _, value := range keys {
+			key := value.(string)
+			if !emitted[key] {
+				t.Fatalf("dangling shape reference %q", key)
+			}
+		}
+	}
+	for _, item := range body["timeline"].([]any) {
+		check(item.(map[string]any)["dominantShapeKeys"].([]any))
+	}
+	for _, item := range body["hotWindows"].([]any) {
+		check(item.(map[string]any)["dominantShapeKeys"].([]any))
+	}
+	for _, item := range body["namespaces"].([]any) {
+		check(item.(map[string]any)["topShapeKeys"].([]any))
+	}
+}
+
+func stringSliceFromAny(v any) []string {
+	items := v.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.(string))
+	}
+	return out
 }

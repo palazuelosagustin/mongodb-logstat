@@ -1,18 +1,18 @@
 ---
 name: mongodb-logstat-skill
-description: Analyze MongoDB slow-query JSON logs with the local mongodb-logstat CLI. Use when Codex needs to summarize slow operations, build time-bucketed timelines, inspect top query shapes, choose the right report and flags, explain mongodb-logstat output for a mongod.log or directory of logs, or answer mongodb-logstat CLI usage questions without consulting --help.
+description: Analyze MongoDB slow-query JSON logs with the local mongodb-logstat CLI. Use when Codex needs to summarize logged slow operations, build timelines, inspect or explain query-shape reports, generate AI-ready analysis JSON, choose flags, write reports to files, or answer mongodb-logstat CLI usage questions without consulting --help.
 ---
 
 # MongoDB Logstat
 
-Use the local `mongodb-logstat` project in this repo to inspect MongoDB slow-query logs.
+Use the local `mongodb-logstat` project in this repo to inspect MongoDB structured JSON slow-operation logs.
 
 ## Quick Start
 
 Prefer the built binary when it exists in the repo root:
 
 ```bash
-./mongodb-logstat --report summary /path/to/mongod.log
+./mongodb-logstat --report timeline /path/to/mongod.log
 ```
 
 If the binary is missing or stale, build it first:
@@ -28,7 +28,7 @@ Flags may appear before or after input paths.
 Usage syntax:
 
 ```text
-mongodb-logstat [--report summary|timeline|queries] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query] [--top N] [--verbose] <file-or-dir> [...]
+mongodb-logstat [--report summary|timeline|queries|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 Accepted inputs:
@@ -37,29 +37,38 @@ Accepted inputs:
 - mixed files and directories
 
 Defaults:
-- `--report summary`
+- `--report summary`, deprecated compatibility path
 - `--bucket 1h`
 - `--group-by optype`
-- `--top 0` meaning no limit
+- `--top` unset means default top `20` for `queries`, query-grouped timelines, and `analysis`; `--top 0` means all
+- `--sort-by total-duration`
+- `--include-internal false`
+- `--fill-gaps true`
+- `--max-buckets 10000`
 - `--json false`
 - `--verbose false`
 - `--from` unset
 - `--to` unset
 
 Flag details:
-- `--report`: `summary`, `timeline`, or `queries`
-- `--json`: emit JSON instead of terminal text
+- `--report`: `summary`, `timeline`, `queries`, or `analysis`
+- `--json`: emit JSON for v1 reports; `analysis` is always JSON
 - `--from`: inclusive RFC3339 lower time bound
-- `--to`: inclusive RFC3339 upper time bound
-- `--bucket`: positive Go duration string used by `timeline`, such as `30m`, `1h`, or `2h`
-- `--group-by`: `optype`, `namespace`, or `query`; used by `timeline`
-- `--top`: non-negative integer; `0` prints all rows or columns, positive values cap `timeline`, `queries`, and summary top lists
+- `--to`: exclusive RFC3339 upper time bound
+- `--bucket`: positive Go duration string, such as `30m`, `1h`, or `2h`
+- `--group-by`: `optype`, `namespace`, `query`, or `category`; used by `timeline`
+- `--top`: non-negative integer; `0` prints all selected rows or columns
+- `--sort-by`: query ranking key: `total-duration`, `count`, `p95`, `max`, or `docs-examined`
+- `--include-internal`: include internal commands in main query ranking; internal activity is summarized separately by `analysis`
+- `--fill-gaps`: emit zero-slow-operation timeline buckets in `analysis`
+- `--max-buckets`: reject `analysis` output that would exceed this bucket count
 - `--verbose`: print per-file failures to stderr when input is partial or failed
 
 Validation rules:
 - at least one input path is required
 - `--bucket` must be a positive duration
-- `--top` must be `0` or greater
+- `--top` must be `0` or greater when supplied
+- `--max-buckets` must be positive
 - `--from` and `--to` must be valid RFC3339 timestamps
 - if both are provided, `--from` must be less than or equal to `--to`
 
@@ -70,66 +79,52 @@ Exit behavior:
 
 ## Report Selection
 
-Choose `summary` when the user wants a fast high-level view:
-- accepted operation count
-- ops/min
-- latency percentiles
-- top operations and namespaces
-- plan summary counts
-- truncated record count
-
 Choose `timeline` when the user wants time-based spikes or changes.
 Common flags:
 - `--bucket 30m` for 30-minute grouping
-- `--group-by optype` for operation columns such as `find`, `update`, `getMore`
+- `--group-by optype` for normalized operation columns such as `find`, `update`, `delete`, `getMore`, `internal`, `other`
 - `--group-by namespace` for namespace columns
 - `--group-by query` for query-shape columns
-- `--top N` only when the user wants to cap columns; omit it to print every group
+- `--group-by category` for `read`, `write`, `cursor`, `transaction`, `command`, `internal`, `other`
+- `--top N` only when the user wants to cap columns; omit it for all optype/namespace/category groups
 
-Choose `queries` when the user wants the most common slow query shapes and their latency.
+Choose `queries` when the user wants ranked slow query shapes and per-shape latency.
 Common flags:
-- `--top N` to limit rows
-- omit `--top` to print every shape
+- `--top N` to limit rows; default is `20`
+- `--top 0` to print every shape
+- `--sort-by total-duration` to rank by cumulative slow duration
+- `--sort-by count`, `p95`, `max`, or `docs-examined` for alternate rankings
+
+Choose `analysis` when the user wants compact AI-ready JSON without raw logs.
+Common flags:
+- `--bucket 30m` for FTDC correlation windows
+- `--top 20` for bounded query shapes and namespaces
+- `--sort-by total-duration` for impact-first ranking
+- `--include-internal` only if internal commands should be in main query ranking
+- `--max-buckets N` if the requested range is very large
+
+Avoid `summary` for new workflows. It is one-pass and deprecated; it still prints accepted slow-op count, logged slow ops/min, and latency stats.
 
 ## Default Commands
 
-Use these default-parameter commands when the user asks for one command per report type:
+Use these commands when the user asks how to run each report type to an output file with default parameters:
 
 ```bash
-./mongodb-logstat /path/to/mongod.log
-./mongodb-logstat --report timeline /path/to/mongod.log
-./mongodb-logstat --report queries /path/to/mongod.log
-```
-
-These are equivalent, with the default report made explicit:
-
-```bash
-./mongodb-logstat --report summary /path/to/mongod.log
-./mongodb-logstat --report timeline --bucket 1h --group-by optype /path/to/mongod.log
-./mongodb-logstat --report queries --top 0 /path/to/mongod.log
-```
-
-## Write Reports To Files
-
-There is no dedicated output flag. Write reports to files with shell redirection.
-
-Terminal-text reports with default parameters:
-
-```bash
-./mongodb-logstat /path/to/mongod.log > summary_report.txt
+./mongodb-logstat --report summary /path/to/mongod.log > summary_report.txt
 ./mongodb-logstat --report timeline /path/to/mongod.log > timeline_report.txt
 ./mongodb-logstat --report queries /path/to/mongod.log > queries_report.txt
+./mongodb-logstat --report analysis /path/to/mongod.log > analysis_report.json
 ```
 
-JSON reports:
+JSON v1 reports:
 
 ```bash
-./mongodb-logstat --json /path/to/mongod.log > summary_report.json
+./mongodb-logstat --report summary --json /path/to/mongod.log > summary_report.json
 ./mongodb-logstat --report timeline --json /path/to/mongod.log > timeline_report.json
 ./mongodb-logstat --report queries --json /path/to/mongod.log > queries_report.json
 ```
 
-Capture stderr separately when needed:
+Capture stderr separately when needed because partial-input details and the summary deprecation warning go to stderr:
 
 ```bash
 ./mongodb-logstat --report timeline --verbose /path/to/mongod.log > timeline_report.txt 2> timeline_errors.txt
@@ -137,43 +132,61 @@ Capture stderr separately when needed:
 
 ## Common Command Patterns
 
-Use these patterns when the user wants non-default filtering or formatting:
-
 ```bash
-./mongodb-logstat --report summary /path/to/mongod.log
 ./mongodb-logstat --report timeline --bucket 30m --group-by optype /path/to/mongod.log
-./mongodb-logstat --report queries --top 10 /path/to/mongod.log
-./mongodb-logstat --report summary --json /path/to/mongod.log
-./mongodb-logstat --report timeline --from 2026-07-14T21:00:00Z --to 2026-07-14T23:00:00Z /path/to/mongod.log
+./mongodb-logstat --report timeline --bucket 30m --group-by query --top 10 /path/to/mongod.log
+./mongodb-logstat --report queries --top 10 --sort-by total-duration /path/to/mongod.log
+./mongodb-logstat --report queries --top 0 --sort-by count /path/to/mongod.log
+./mongodb-logstat --report analysis --bucket 30m --top 20 /path/to/mongod.log > mongodb-analysis.json
+./mongodb-logstat --report analysis --from 2026-07-14T21:00:00Z --to 2026-07-14T23:00:00Z /path/to/mongod.log > mongodb-analysis.json
 ```
 
 ## Output Semantics
 
 Keep these behaviors in mind when explaining results:
-- `summary` is one-pass; `timeline` and `queries` are two-pass.
-- `timeline` prints every group unless `--top` is set to a positive value.
-- `queries` groups by an internal shape key, but visible `shapeId` is `null` when the server did not log `queryHash` or `planCacheShapeHash`.
-- `queries.sampleLine` or the terminal `sample_line` column is the best way to correlate a row back to the raw log.
-- auth mechanism commands such as `saslStart` are excluded and should not appear as query operations.
-- oversized logical lines above `16 MiB` are skipped and counted as malformed.
-- if some inputs fail but at least one succeeds, the tool reports partial input.
-- `summary` uses one pass only, so it is the cheapest report for a first look.
+- `timeline`, `queries`, and `analysis` use normalized operations; raw internal command names such as `configTerm` do not appear as normal workload operations.
+- `summary` is one-pass; `timeline` and `queries` are two-pass; `analysis` emits schema-version-2 JSON.
+- Query identity precedence is `queryShapeHash`, `planCacheShapeHash`, `queryHash`, then local deterministic privacy-safe canonical hash.
+- `planCacheKey` is plan-variant evidence, not query identity.
+- Query labels are `operation:namespace#short-shape-id`; they never render `#null`.
+- Associated `getMore` latency contributes to the originating query shape when `originatingCommand` is available, but operation timelines still count it as `getMore`.
+- `queries.sampleLine` or terminal `sample_line` points to the worst-duration sample for that row.
+- Oversized logical lines above `16 MiB` are skipped and counted as malformed.
+- If some inputs fail but at least one succeeds, the tool reports partial input.
+- Counts and rates represent logged slow operations only; they may be sampled and do not prove total workload. Analysis rates include the explicit denominator under `global.rates.overAnalysisRange`.
+- Cumulative duration can overlap across concurrent operations and is not server utilization.
+
+## Analysis JSON Contents
+
+The `analysis` report includes:
+- `schemaVersion: 2` and `report: analysis`
+- `semantics` with slow-log limitations and privacy guarantees
+- `ranges` for requested, input-observed, and slow-operation-observed time spans
+- `diagnostics` for input status, malformed lines, filtered records, canonicalization fallback, and unassociated `getMore`
+- `global` latency, bounded counts, cumulative duration, structured indicators, and denominator-qualified rates
+- `timeline` filled buckets by default
+- `hotWindows` for FTDC correlation
+- `queryShapes` with globally unique `shapeKey` values, redacted shape, observed operations, cursor counts, impact, optional metrics, `planEvidence`, ratios, indicators, and worst sample reference
+- `namespaces`, `internalOperations`, `omitted`, and `indicatorThresholds`
+
+Redaction preserves field paths/operators/stages/sort structure and replaces values with type markers such as `?string`, `?number`, and `?date`. Do not claim values are available from `analysis`.
 
 ## Interpretation Hints
 
-Use these shortcuts when helping a user read the reports:
-- In `timeline`, columns after `start` and `total` are the selected group values for `--group-by`.
-- In `queries`, `label` is `operation:namespace#shapeId-or-null`.
+Use these shortcuts when helping a user read reports:
+- In `timeline`, columns after `start` and `total` are selected group values for `--group-by`.
 - In `queries`, `plan` is the dominant rendered plan summary for that shape.
-- In `summary`, latency values are milliseconds.
-- In `summary`, `ops/min` uses the explicit `--from/--to` range when both are provided; otherwise it uses the observed event range rounded up to whole minutes with a minimum of one minute.
+- In `queries`, `avg_ms`, `p95_ms`, and `max_ms` are milliseconds.
+- In `analysis.queryShapes[].impact`, `totalDurationMs` ranks cumulative logged slow-operation impact.
+- In `analysis.queryShapes[].execution`, metric averages only include records where the metric was present; missing metrics are not coerced to zero.
+- For suspected resource pressure, use `analysis.hotWindows` as time windows to correlate with FTDC; do not infer CPU, disk, memory, or replica health from slow logs alone.
 
 ## Working Pattern
 
 When asked to analyze a log or explain how to run the tool:
-1. Pick the report that matches the user question.
-2. Prefer the default command for that report unless the user asked for filters or JSON.
+1. Pick `timeline` for time windows, `queries` for top shapes, or `analysis` for AI-ready evidence.
+2. Prefer default commands unless the user asked for filters, JSON, or specific bucket/top values.
 3. Use shell redirection when the user wants an output file.
-4. Quote the exact command you used when the user asks how you produced the report.
-5. If the user asks about a specific query row, use `sample_line` to point back to the raw log.
-6. Answer CLI usage questions from this skill content rather than invoking `--help` unless the binary behavior has changed.
+4. Quote the exact command used when asked how a report was produced.
+5. Use `sample_line` to point back to a raw log sample when the user asks about a specific query row.
+6. Answer CLI usage questions from this skill content rather than invoking `--help` unless validating a changed binary.

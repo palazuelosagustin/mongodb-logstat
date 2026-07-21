@@ -1,86 +1,122 @@
 # mongodb-logstat
 
-`mongodb-logstat` is a small Go CLI for summarizing MongoDB slow query log output.
-
-It currently supports three report types:
-
-- `summary`
-- `timeline`
-- `queries`
+`mongodb-logstat` summarizes MongoDB structured JSON slow-operation logs. It provides human terminal reports for quick review and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
 
 ## Requirements
 
 - Go `1.22+`
 
-## Run
-
-From the project directory:
+## Build
 
 ```bash
-env GOTOOLCHAIN=local /usr/bin/go run . --report summary /path/to/mongod.log
+go build -o mongodb-logstat .
 ```
 
 ## Usage
 
 ```text
-mongodb-logstat [--report summary|timeline|queries] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query] [--top N] [--verbose] <file-or-dir> [...]
+mongodb-logstat [--report timeline|queries|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
+
+Flags may appear before or after input paths. Inputs can be files, directories, or a mix of both.
+
+Important defaults:
+
+- `--bucket 1h`.
+- `--group-by optype`.
+- `--top` defaults to `20` for `queries`, query-grouped timelines, and `analysis`; use `--top 0` for all shapes/groups.
+- `--sort-by total-duration` for query ranking.
+- `--fill-gaps=true` for `analysis` timeline buckets.
+- `--max-buckets 10000`.
 
 ## Reports
 
-### `summary`
-
-One-pass aggregate report with:
-
-- accepted operation count
-- operations per minute
-- latency stats
-- top operations
-- top namespaces
-- plan summary counts
-- truncated record count
-
 ### `timeline`
 
-Two-pass bucketed report for terminal or JSON output.
-
-Useful flags:
-
-- `--bucket 30m`
-- `--group-by optype`
-- `--group-by namespace`
-- `--group-by query`
-- `--top N` to limit timeline columns or query rows; omit it to print all
-
-Example:
+Bucketed terminal or JSON report for spotting slow-operation time windows.
 
 ```bash
-env GOTOOLCHAIN=local /usr/bin/go run . --report timeline --bucket 30m --top 10 /home/agustin.palazuelos/replSet/rs0/rs1/mongod.log
+./mongodb-logstat --report timeline --bucket 30m --group-by optype /path/to/mongod.log
+./mongodb-logstat --report timeline --bucket 30m --group-by namespace --top 10 /path/to/logs
+./mongodb-logstat --report timeline --json /path/to/mongod.log > timeline.json
 ```
+
+`--group-by optype` uses normalized operations such as `find`, `aggregate`, `getMore`, `update`, `delete`, `internal`, and `other`; raw internal command names such as `configTerm` are not exposed as workload columns.
 
 ### `queries`
 
-Two-pass top-N per-query-shape report with exact counts for selected shapes and latency stats for those shapes.
+Two-pass top query-shape report with exact counts and latency stats for selected shapes.
 
-## JSON Output
+```bash
+./mongodb-logstat --report queries /path/to/mongod.log
+./mongodb-logstat --report queries --top 20 --sort-by total-duration /path/to/mongod.log
+./mongodb-logstat --report queries --json /path/to/mongod.log > queries.json
+```
 
-Pass `--json` to emit structured JSON. All JSON reports include:
+Rows include `label`, `count`, `avg_ms`, `p95_ms`, `max_ms`, dominant `plan`, and `sample_line`. `sample_line` identifies the worst-duration sample contributing to the row. Query labels are `operation:namespace#short-shape-id`; labels never render `#null`, and colliding prefixes are extended deterministically.
 
-- `schemaVersion`
-- `report`
-- `range`
-- `observedRange`
-- `diagnostics`
+### `analysis`
 
-## Notes
+Schema-version-2 JSON report for AI analysis. It is always JSON; `--json` is accepted but not required.
 
-- Oversized logical lines above `16 MiB` are skipped and counted as malformed.
-- Partial input is reported in terminal output and in JSON diagnostics.
-- If no input file can be read successfully, the program exits with code `1`.
-- Valid no-match reports still exit with code `0`.
+```bash
+./mongodb-logstat \
+  --report analysis \
+  --bucket 30m \
+  --top 20 \
+  --sort-by total-duration \
+  --from 2026-06-30T00:00:00Z \
+  --to 2026-06-30T08:00:00Z \
+  /path/to/mongodb/logs > mongodb-analysis.json
+```
+
+The report includes:
+
+- explicit semantics stating that the dataset is logged slow operations, not total workload;
+- requested, input-observed, and accepted slow-operation ranges;
+- diagnostics for partial input, malformed lines, filtering, canonicalization fallback, and unassociated `getMore`;
+- filled timeline buckets for FTDC correlation;
+- hot windows ranked by cumulative slow-operation duration;
+- ranked query shapes with globally unique `shapeKey` values, redacted structure, observed operations, cursor counts, latency, cumulative impact, optional metric aggregates, `planEvidence`, indicators, and worst sample reference;
+- top namespaces, compact internal-operation summaries, and omitted-data accounting.
+
+## Query Identity
+
+Shape identity precedence is:
+
+1. `attr.queryShapeHash`
+2. `attr.planCacheShapeHash`
+3. `attr.queryHash`
+4. a local deterministic privacy-safe canonical hash
+
+`planCacheKey` is stored as plan-variant evidence, not used as shape identity. When canonicalization exceeds limits, the tool hashes a reduced structural fallback and records canonicalization diagnostics.
+
+## Redaction And Limits
+
+The `analysis` report never emits raw log lines or literal query/update values. It preserves field paths, operators, command names, stage names, sort direction, projection fields, hints/collation/read/write concerns, and structural evidence while replacing values with type markers such as `?string`, `?number`, and `?date`.
+
+Limits include a `16 MiB` logical line limit, canonical nesting depth `32`, object key limit `1000`, inspected array element limit `1000`, and canonical representation limit `1 MiB`.
+
+## Slow-Log Semantics
+
+Counts and rates represent accepted logged slow operations only. They may be sampled depending on MongoDB slow-operation configuration. Cumulative duration can overlap across concurrent operations and is not server utilization.
+
+Analysis rates are emitted under `global.rates.overAnalysisRange` with an explicit denominator. If both `--from` and `--to` are set, the denominator is that selected range; otherwise it is the observed input log range, falling back to the accepted slow-operation range when needed. `--from` is inclusive and `--to` is exclusive.
+
+## Partial Input
+
+If one or more files fail but at least one file is read, terminal reports print:
+
+```text
+Input status: partial (1/3 files read successfully)
+```
+
+JSON reports include diagnostics. If no input file can be read successfully, the tool exits with code `1` and emits no report body.
 
 ## Test
 
 ```bash
-env GOTOOLCHAIN=local /usr/bin/go test ./...
+go test ./...
+go vet ./...
+go test -race ./...
 ```
