@@ -209,6 +209,9 @@ func parseSlowOperationDoc(raw map[string]any, path string, lineNumber int64, st
 	}
 
 	command, _ := attr["command"].(map[string]any)
+	if command == nil {
+		command = commandDocumentFromType(attr)
+	}
 	originatingCommand, _ := attr["originatingCommand"].(map[string]any)
 	commandName := deriveCommandName(command)
 	if commandName == "" {
@@ -342,6 +345,15 @@ func rejectSlow(stats *PassStats, reason string) {
 	stats.Diagnostics.RejectedByReason[reason]++
 }
 
+func commandDocumentFromType(attr map[string]any) map[string]any {
+	typeName := strings.TrimSpace(asString(attr["type"]))
+	if typeName == "" {
+		return nil
+	}
+	command, _ := attr[typeName].(map[string]any)
+	return command
+}
+
 func parseTimestamp(v any) (time.Time, bool) {
 	obj, ok := v.(map[string]any)
 	if !ok {
@@ -408,6 +420,7 @@ func normalizeOperation(commandName string, command, originatingCommand map[stri
 	if name == "" && command != nil {
 		name = deriveCommandName(command)
 	}
+	name = canonicalCommandName(name)
 	switch name {
 	case "find", "aggregate", "count", "distinct":
 		return OperationInfo{Category: "read", Operation: name}
@@ -439,6 +452,16 @@ func normalizeOperation(commandName string, command, originatingCommand map[stri
 		}
 		stats.Diagnostics.UnknownOperationTypes++
 		return OperationInfo{Category: "other", Operation: "other"}
+	}
+}
+
+func canonicalCommandName(name string) string {
+	name = strings.TrimSpace(name)
+	switch strings.ToLower(name) {
+	case "findandmodify", "find_and_modify":
+		return "findAndModify"
+	default:
+		return name
 	}
 }
 

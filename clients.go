@@ -236,7 +236,7 @@ func renderClients(cfg Config, report ClientsReport) (string, int, error) {
 		bl := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 		fmt.Fprint(bl, "CLIENT_IP\tTOTAL")
 		for _, col := range columns {
-			fmt.Fprint(bl, "\t"+col)
+			fmt.Fprint(bl, "\t"+clientColumnLabel(col))
 		}
 		fmt.Fprint(bl, "\n")
 		for _, row := range group.rows {
@@ -438,6 +438,13 @@ func omittedClientTotals(aggs map[string]*clientAgg, selected map[string]struct{
 		ms += agg.DurationMs
 	}
 	return groups, ops, ms
+}
+
+func clientColumnLabel(column string) string {
+	if column == "other" {
+		return "unclassified"
+	}
+	return column
 }
 
 func visibleClientOperationColumns(rows []clientsRowJSON) []string {

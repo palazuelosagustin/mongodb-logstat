@@ -338,6 +338,82 @@ func TestSummaryRateSemantics(t *testing.T) {
 	}
 }
 
+func TestCommandDocumentCanComeFromTypeNamedAttr(t *testing.T) {
+	line := slowLineCustom("2026-07-17T10:00:00Z", map[string]any{
+		"type": "collection23mand",
+		"ns":   "shop.orders",
+		"collection23mand": map[string]any{
+			"findAndModify": "orders",
+			"$db":           "shop",
+			"query":         map[string]any{"_id": 1},
+			"update":        map[string]any{"$set": map[string]any{"status": "done"}},
+		},
+		"durationMillis": 100,
+	})
+	op, status := parseLineForTest(t, line)
+	if status != lineAccepted {
+		t.Fatalf("status=%v", status)
+	}
+	if op.Operation != "findAndModify" || op.Category != "write" {
+		t.Fatalf("operation=%q category=%q want findAndModify/write", op.Operation, op.Category)
+	}
+}
+
+func TestFindAndModifyAliasesCountAsFindAndModify(t *testing.T) {
+	line := slowLineCustom("2026-07-17T10:00:00Z", map[string]any{
+		"type":           "findandmodify",
+		"command":        map[string]any{"findAndModify": "orders", "$db": "shop", "query": map[string]any{"_id": 1}, "update": map[string]any{"$set": map[string]any{"status": "done"}}},
+		"durationMillis": 100,
+	})
+	op, status := parseLineForTest(t, line)
+	if status != lineAccepted {
+		t.Fatalf("status=%v", status)
+	}
+	if op.Operation != "findAndModify" || op.Category != "write" {
+		t.Fatalf("operation=%q category=%q want findAndModify/write", op.Operation, op.Category)
+	}
+	if op.Namespace != "shop.orders" {
+		t.Fatalf("namespace=%q want shop.orders", op.Namespace)
+	}
+}
+
+func TestTimelineAndAnalysisCountFindAndModify(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		slowLineCustom("2026-07-17T10:00:00Z", map[string]any{
+			"type":           "findandmodify",
+			"command":        map[string]any{"findAndModify": "orders", "$db": "shop", "query": map[string]any{"_id": 1}, "update": map[string]any{"$set": map[string]any{"status": "done"}}},
+			"durationMillis": 100,
+		}),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	timeline := computeTimeline([]string{path}, nil, Config{Bucket: time.Hour, GroupBy: "optype", Top: 0})
+	if !containsString(timeline.Columns, "findAndModify") {
+		t.Fatalf("timeline columns=%v missing findAndModify", timeline.Columns)
+	}
+	if len(timeline.Rows) != 1 || timeline.Rows[0].Counts["findAndModify"] != 1 || timeline.Rows[0].Counts["other"] != 0 {
+		t.Fatalf("timeline rows=%+v want one findAndModify and no other", timeline.Rows)
+	}
+
+	body, _ := runAnalysisForTest(t, path, Config{Report: "analysis", Bucket: time.Hour, Top: 10, SortBy: "total-duration", FillGaps: true, MaxBuckets: 10000})
+	global := body["global"].(map[string]any)
+	ops := global["countsByOperation"].(map[string]any)
+	if got := int(ops["findAndModify"].(float64)); got != 1 {
+		t.Fatalf("analysis findAndModify count=%d want 1 in %+v", got, ops)
+	}
+	if value, ok := ops["other"]; ok && int(value.(float64)) != 0 {
+		t.Fatalf("analysis other count=%v want 0 in %+v", value, ops)
+	}
+	shape := body["queryShapes"].([]any)[0].(map[string]any)
+	if shape["operation"] != "findAndModify" || shape["category"] != "write" {
+		t.Fatalf("analysis shape operation/category=%v/%v want findAndModify/write", shape["operation"], shape["category"])
+	}
+}
+
 func TestInternalCommandsNormalizeToInternal(t *testing.T) {
 	line := slowLineCustom("2026-07-17T10:00:00Z", map[string]any{
 		"type":           "configTerm",
@@ -507,6 +583,7 @@ func TestClientsTerminalGroupingAndColumns(t *testing.T) {
 		clientEventLine("2026-07-17T10:00:05Z", "conn3", "Authentication succeeded", map[string]any{"principalName": "batch", "authenticationDatabase": "reporting", "remote": "10.20.30.43:55102"}),
 		slowLineWithCtx("2026-07-17T10:01:00Z", "conn1", "10.20.30.41:55100", "find", "shop", "orders", 100, nil),
 		slowLineWithCtx("2026-07-17T10:02:00Z", "conn1", "10.20.30.41:55100", "update", "shop", "orders", 100, nil),
+		slowLineWithCtx("2026-07-17T10:02:30Z", "conn1", "10.20.30.41:55100", "unknownCommand", "shop", "orders", 100, nil),
 		slowLineWithCtx("2026-07-17T10:03:00Z", "conn2", "10.20.30.42:55101", "insert", "shop", "orders", 100, nil),
 		slowLineWithCtx("2026-07-17T10:04:00Z", "conn3", "10.20.30.43:55102", "aggregate", "reporting", "events", 100, nil),
 		slowLineWithCtx("2026-07-17T10:05:00Z", "conn999", "10.20.30.41:59999", "delete", "shop", "orders", 100, nil),
@@ -526,6 +603,9 @@ func TestClientsTerminalGroupingAndColumns(t *testing.T) {
 	}
 	if strings.Index(out, "appUser@admin") > strings.Index(out, "batch@reporting") {
 		t.Fatalf("user groups not ordered by best global rank:\n%s", out)
+	}
+	if !strings.Contains(out, "unclassified") || strings.Contains(out, "other") {
+		t.Fatalf("terminal output should label fallback bucket as unclassified, not other:\n%s", out)
 	}
 	for _, col := range []string{"find", "aggregate", "insert", "update"} {
 		if !strings.Contains(out, col) {
