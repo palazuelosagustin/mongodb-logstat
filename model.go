@@ -57,6 +57,8 @@ type RedactedShape struct {
 
 type SlowOperation struct {
 	Timestamp          time.Time
+	Ctx                string
+	Remote             string
 	Namespace          string
 	Category           string
 	Operation          string

@@ -379,10 +379,222 @@ func TestAnalysisReportSchemaV2NoRawValues(t *testing.T) {
 	}
 }
 
+func TestClientsReportCorrelatesByExactCtxAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		clientEventLine("2026-07-17T10:00:00Z", "conn1", "Connection accepted", map[string]any{"connectionId": 1, "remote": "10.20.30.41:55100"}),
+		clientEventLine("2026-07-17T10:00:01Z", "conn1", "client metadata", map[string]any{"remote": "10.20.30.41:55100", "doc": map[string]any{"application": map[string]any{"name": "checkout"}, "driver": map[string]any{"name": "nodejs", "version": "6.6"}, "os": map[string]any{"type": "Linux", "name": "Ubuntu", "version": "24.04"}}}),
+		clientEventLine("2026-07-17T10:00:02Z", "conn1", "Authentication succeeded", map[string]any{"principalName": "appUser", "authenticationDatabase": "admin", "mechanism": "SCRAM-SHA-256", "remote": "10.20.30.41:55100"}),
+		clientEventLine("2026-07-17T10:00:03Z", "conn2", "Connection accepted", map[string]any{"connectionId": 2, "remote": "10.20.30.42:55101"}),
+		clientEventLine("2026-07-17T10:00:04Z", "conn2", "Authentication succeeded", map[string]any{"principalName": "appUser", "authenticationDatabase": "admin", "remote": "10.20.30.42:55101"}),
+		clientEventLine("2026-07-17T10:00:05Z", "conn3", "Connection accepted", map[string]any{"connectionId": 3, "remote": "10.20.30.43:55102"}),
+		clientEventLine("2026-07-17T10:00:06Z", "conn3", "Authentication succeeded", map[string]any{"principalName": "batch", "authenticationDatabase": "reporting", "remote": "10.20.30.43:55102"}),
+		slowLineWithCtx("2026-07-17T10:01:00Z", "conn1", "10.20.30.41:55100", "find", "shop", "orders", 100, map[string]any{"docsExamined": 5, "filter": map[string]any{"secret": "do-not-leak"}}),
+		slowLineWithCtx("2026-07-17T10:02:00Z", "conn1", "10.20.30.41:55100", "update", "shop", "orders", 200, map[string]any{"docsExamined": 10}),
+		slowLineWithCtx("2026-07-17T10:03:00Z", "conn2", "10.20.30.42:55101", "insert", "shop", "orders", 300, nil),
+		slowLineWithCtx("2026-07-17T10:04:00Z", "conn3", "10.20.30.43:55102", "aggregate", "reporting", "events", 900, nil),
+		slowLineWithCtx("2026-07-17T10:05:00Z", "conn999", "10.20.30.41:59999", "find", "shop", "orders", 1000, nil),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := Execute(Config{Report: "clients", JSON: true, Top: 2, Inputs: []string{path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "do-not-leak") {
+		t.Fatalf("clients report leaked raw predicate value: %s", out)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		t.Fatal(err)
+	}
+	if int(body["schemaVersion"].(float64)) != 1 || body["report"] != "clients" {
+		t.Fatalf("unexpected clients envelope: %+v", body)
+	}
+	if body["ranking"] != "count" {
+		t.Fatalf("ranking=%v want count", body["ranking"])
+	}
+	totals := body["totals"].(map[string]any)
+	if got := int(totals["loggedSlowOperations"].(float64)); got != 5 {
+		t.Fatalf("loggedSlowOperations=%d want 5", got)
+	}
+	if got := int(totals["correlatedSlowOperations"].(float64)); got != 4 {
+		t.Fatalf("correlatedSlowOperations=%d want 4", got)
+	}
+	if got := int(totals["uncorrelatedSlowOperations"].(float64)); got != 1 {
+		t.Fatalf("uncorrelatedSlowOperations=%d want 1", got)
+	}
+	omitted := body["omitted"].(map[string]any)
+	if got := int(omitted["groups"].(float64)); got != 1 {
+		t.Fatalf("omitted.groups=%d want 1", got)
+	}
+	if got := int(omitted["slowOperations"].(float64)); got != 1 {
+		t.Fatalf("omitted.slowOperations=%d want 1", got)
+	}
+	if got := int(omitted["uncorrelatedSlowOperations"].(float64)); got != 1 {
+		t.Fatalf("omitted.uncorrelatedSlowOperations=%d want 1", got)
+	}
+
+	rows := body["rows"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("rows=%d want 2", len(rows))
+	}
+	first := rows[0].(map[string]any)
+	if first["user"] != "appUser" || first["authenticationDatabase"] != "admin" || first["clientIP"] != "10.20.30.41" {
+		t.Fatalf("unexpected first row identity: %+v", first)
+	}
+	if got := int(first["loggedSlowOperations"].(float64)); got != 2 {
+		t.Fatalf("first.loggedSlowOperations=%d want 2", got)
+	}
+	ops := first["countsByOperation"].(map[string]any)
+	if int(ops["find"].(float64)) != 1 || int(ops["update"].(float64)) != 1 {
+		t.Fatalf("first countsByOperation=%+v want find/update", ops)
+	}
+	if apps := stringSliceFromAny(first["applications"]); len(apps) != 1 || apps[0] != "checkout" {
+		t.Fatalf("applications=%+v want checkout", first["applications"])
+	}
+	if drivers := stringSliceFromAny(first["drivers"]); len(drivers) != 1 || drivers[0] != "nodejs 6.6" {
+		t.Fatalf("drivers=%+v want nodejs 6.6", first["drivers"])
+	}
+	second := rows[1].(map[string]any)
+	if second["user"] != "batch" || second["clientIP"] != "10.20.30.43" {
+		t.Fatalf("unexpected second row, top selection should be global by rank then duration: %+v", second)
+	}
+}
+
+func TestClientsReportTimeFiltersMetadataAndSlowOps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		clientEventLine("2026-07-17T10:00:00Z", "connOld", "Connection accepted", map[string]any{"remote": "10.0.0.1:1"}),
+		clientEventLine("2026-07-17T10:00:01Z", "connOld", "Authentication succeeded", map[string]any{"principalName": "old", "authenticationDatabase": "admin", "remote": "10.0.0.1:1"}),
+		clientEventLine("2026-07-17T10:05:00Z", "connIn", "Connection accepted", map[string]any{"remote": "10.0.0.2:2"}),
+		clientEventLine("2026-07-17T10:05:00Z", "connIn", "Authentication succeeded", map[string]any{"principalName": "inside", "authenticationDatabase": "admin", "remote": "10.0.0.2:2"}),
+		slowLineWithCtx("2026-07-17T10:10:00Z", "connOld", "10.0.0.1:1", "find", "shop", "orders", 100, nil),
+		slowLineWithCtx("2026-07-17T10:59:59Z", "connIn", "10.0.0.2:2", "find", "shop", "orders", 100, nil),
+		clientEventLine("2026-07-17T11:00:00Z", "connTo", "Authentication succeeded", map[string]any{"principalName": "to", "authenticationDatabase": "admin", "remote": "10.0.0.3:3"}),
+		slowLineWithCtx("2026-07-17T11:00:00Z", "connTo", "10.0.0.3:3", "find", "shop", "orders", 100, nil),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	from := mustTime(t, "2026-07-17T10:05:00Z")
+	to := mustTime(t, "2026-07-17T11:00:00Z")
+	report := computeClients([]string{path}, nil, Config{Top: 0, From: &from, To: &to})
+	if report.Accepted != 2 {
+		t.Fatalf("accepted=%d want 2", report.Accepted)
+	}
+	if report.UncorrelatedSlowOperations != 1 {
+		t.Fatalf("uncorrelated=%d want 1 because pre-from metadata is ignored", report.UncorrelatedSlowOperations)
+	}
+	if len(report.Rows) != 1 || report.Rows[0].User != "inside" || report.Rows[0].ClientIP != "10.0.0.2" {
+		t.Fatalf("rows=%+v want only inside@admin 10.0.0.2", report.Rows)
+	}
+}
+
+func TestClientsTerminalGroupingAndColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mongo.log")
+	lines := []string{
+		clientEventLine("2026-07-17T10:00:00Z", "conn1", "Connection accepted", map[string]any{"remote": "10.20.30.41:55100"}),
+		clientEventLine("2026-07-17T10:00:01Z", "conn1", "Authentication succeeded", map[string]any{"principalName": "appUser", "authenticationDatabase": "admin", "remote": "10.20.30.41:55100"}),
+		clientEventLine("2026-07-17T10:00:02Z", "conn2", "Connection accepted", map[string]any{"remote": "10.20.30.42:55101"}),
+		clientEventLine("2026-07-17T10:00:03Z", "conn2", "Authentication succeeded", map[string]any{"principalName": "appUser", "authenticationDatabase": "admin", "remote": "10.20.30.42:55101"}),
+		clientEventLine("2026-07-17T10:00:04Z", "conn3", "Connection accepted", map[string]any{"remote": "10.20.30.43:55102"}),
+		clientEventLine("2026-07-17T10:00:05Z", "conn3", "Authentication succeeded", map[string]any{"principalName": "batch", "authenticationDatabase": "reporting", "remote": "10.20.30.43:55102"}),
+		slowLineWithCtx("2026-07-17T10:01:00Z", "conn1", "10.20.30.41:55100", "find", "shop", "orders", 100, nil),
+		slowLineWithCtx("2026-07-17T10:02:00Z", "conn1", "10.20.30.41:55100", "update", "shop", "orders", 100, nil),
+		slowLineWithCtx("2026-07-17T10:03:00Z", "conn2", "10.20.30.42:55101", "insert", "shop", "orders", 100, nil),
+		slowLineWithCtx("2026-07-17T10:04:00Z", "conn3", "10.20.30.43:55102", "aggregate", "reporting", "events", 100, nil),
+		slowLineWithCtx("2026-07-17T10:05:00Z", "conn999", "10.20.30.41:59999", "delete", "shop", "orders", 100, nil),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := Execute(Config{Report: "clients", Top: 0, Inputs: []string{path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Clients report (ranking count, top all, displayed_groups 3, omitted_groups 0, omitted_slow_ops 1)", "appUser@admin", "batch@reporting", "CLIENT_IP", "TOTAL"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("terminal output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "appUser@admin") > strings.Index(out, "batch@reporting") {
+		t.Fatalf("user groups not ordered by best global rank:\n%s", out)
+	}
+	for _, col := range []string{"find", "aggregate", "insert", "update"} {
+		if !strings.Contains(out, col) {
+			t.Fatalf("terminal output missing operation column %q:\n%s", col, out)
+		}
+	}
+	if strings.Contains(out, "delete") {
+		t.Fatalf("uncorrelated delete operation should not create a displayed column:\n%s", out)
+	}
+	if !(strings.Index(out, "find") < strings.Index(out, "aggregate") && strings.Index(out, "aggregate") < strings.Index(out, "insert") && strings.Index(out, "insert") < strings.Index(out, "update")) {
+		t.Fatalf("operation columns are not in deterministic order:\n%s", out)
+	}
+}
+
+func TestParseCLIClientsDefaultSortByCount(t *testing.T) {
+	cfg, err := parseCLI([]string{"/tmp/mongo.log", "--report", "clients"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SortBy != "count" {
+		t.Fatalf("clients default sortBy=%q want count", cfg.SortBy)
+	}
+	cfg, err = parseCLI([]string{"/tmp/mongo.log", "--report", "clients", "--sort-by", "p95"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SortBy != "p95" {
+		t.Fatalf("explicit clients sortBy=%q want p95", cfg.SortBy)
+	}
+}
+
 func parseLineForTest(t *testing.T, line string) (*SlowOperation, lineStatus) {
 	t.Helper()
 	stats := &PassStats{}
 	return parseSlowOperationLine([]byte(line), "test.log", 1, stats)
+}
+
+func clientEventLine(ts, ctx, msg string, attr map[string]any) string {
+	doc := map[string]any{
+		"t":    map[string]any{"$date": ts},
+		"ctx":  ctx,
+		"msg":  msg,
+		"attr": attr,
+	}
+	data, _ := json.Marshal(doc)
+	return string(data)
+}
+
+func slowLineWithCtx(ts, ctx, remote, commandName, db, collection string, durationMs int, extra map[string]any) string {
+	command := map[string]any{commandName: collection, "$db": db}
+	attr := map[string]any{
+		"type":           "command",
+		"ns":             "",
+		"remote":         remote,
+		"command":        command,
+		"durationMillis": durationMs,
+		"planSummary":    "IXSCAN",
+	}
+	for k, v := range extra {
+		attr[k] = v
+	}
+	doc := map[string]any{
+		"t":    map[string]any{"$date": ts},
+		"ctx":  ctx,
+		"msg":  "Slow query",
+		"attr": attr,
+	}
+	data, _ := json.Marshal(doc)
+	return string(data)
 }
 
 func slowLine(ts, commandName, db, collection string, durationMs int, extra map[string]any) string {

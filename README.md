@@ -1,6 +1,6 @@
 # mongodb-logstat
 
-`mongodb-logstat` summarizes MongoDB structured JSON slow-operation logs. It provides human terminal reports for quick review and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
+`mongodb-logstat` summarizes MongoDB structured JSON slow-operation logs. It provides human terminal reports for quick review, a client correlation report, and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
 
 ## Requirements
 
@@ -15,7 +15,7 @@ go build -o mongodb-logstat .
 ## Usage
 
 ```text
-mongodb-logstat [--report timeline|queries|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat [--report timeline|queries|clients|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 Flags may appear before or after input paths. Inputs can be files, directories, or a mix of both.
@@ -24,8 +24,8 @@ Important defaults:
 
 - `--bucket 1h`.
 - `--group-by optype`.
-- `--top` defaults to `20` for `queries`, query-grouped timelines, and `analysis`; use `--top 0` for all shapes/groups.
-- `--sort-by total-duration` for query ranking.
+- `--top` defaults to `20` for `queries`, query-grouped timelines, and `analysis`; `clients` defaults to all correlated user/client groups unless `--top` is set; use `--top 0` for all shapes/groups.
+- `--sort-by total-duration` for query ranking and `count` for client ranking. `clients` also supports `total-duration`, `p95`, `max`, and `docs-examined`.
 - `--fill-gaps=true` for `analysis` timeline buckets.
 - `--max-buckets 10000`.
 
@@ -54,6 +54,19 @@ Two-pass top query-shape report with exact counts and latency stats for selected
 ```
 
 Rows include `label`, `count`, `avg_ms`, `p95_ms`, `max_ms`, dominant `plan`, and `sample_line`. `sample_line` identifies the worst-duration sample contributing to the row. Query labels are `operation:namespace#short-shape-id`; labels never render `#null`, and colliding prefixes are extended deterministically.
+
+
+### `clients`
+
+Terminal or JSON report that correlates accepted logged slow operations to MongoDB connection, client metadata, and authentication events by exact log context such as `ctx:"conn188052"`. It never attributes by client IP alone. Slow operations without matching in-range connection metadata are counted as uncorrelated.
+
+```bash
+./mongodb-logstat --report clients /path/to/mongod.log
+./mongodb-logstat --report clients --top 20 --sort-by count /path/to/logs
+./mongodb-logstat --report clients --json /path/to/mongod.log > clients.json
+```
+
+The primary ranked unit is `{database user, client IP}`. Terminal output groups globally ranked rows under `user@authenticationDatabase` headings and shows deterministic operation columns, hiding columns that are zero for all displayed rows. JSON output uses the schema-version-1 envelope and includes per-row applications, drivers, latency, operation counts, top namespaces, sample line references, omitted groups, and uncorrelated slow-operation counts.
 
 ### `analysis`
 

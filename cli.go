@@ -35,17 +35,18 @@ func parseCLI(args []string) (Config, error) {
 	from := fs.String("from", "", "RFC3339 lower time bound")
 	to := fs.String("to", "", "RFC3339 upper time bound")
 	bucket := fs.String("bucket", "1h", "timeline bucket size")
-	fs.StringVar(&cfg.Report, "report", "summary", "summary|timeline|queries|analysis")
+	fs.StringVar(&cfg.Report, "report", "summary", "summary|timeline|queries|clients|analysis")
 	fs.StringVar(&cfg.GroupBy, "group-by", "optype", "timeline grouping: optype|namespace|query|category")
 	fs.IntVar(&cfg.Top, "top", -1, "limit rows or columns to the top N; 0 prints all")
 	fs.BoolVar(&cfg.JSON, "json", false, "emit JSON")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "print per-file failures to stderr")
-	fs.StringVar(&cfg.SortBy, "sort-by", "total-duration", "analysis/query ranking: total-duration|count|p95|max|docs-examined")
+	fs.StringVar(&cfg.SortBy, "sort-by", "total-duration", "analysis/query/client ranking: total-duration|count|p95|max|docs-examined")
 	fs.BoolVar(&cfg.IncludeInternal, "include-internal", false, "include internal commands in main analysis/query ranking")
 	fs.BoolVar(&cfg.FillGaps, "fill-gaps", true, "emit explicit zero buckets in analysis timeline")
 	fs.IntVar(&cfg.MaxBuckets, "max-buckets", 10000, "maximum analysis timeline buckets")
 
 	normalized := normalizeCLIArgs(args)
+	sortByProvided := hasFlag(normalized, "sort-by")
 	if err := fs.Parse(normalized); err != nil {
 		return Config{}, errUsage
 	}
@@ -64,9 +65,12 @@ func parseCLI(args []string) (Config, error) {
 
 	cfg.Report = strings.TrimSpace(cfg.Report)
 	switch cfg.Report {
-	case "summary", "timeline", "queries", "analysis":
+	case "summary", "timeline", "queries", "clients", "analysis":
 	default:
 		return Config{}, fmt.Errorf("invalid --report: %q", cfg.Report)
+	}
+	if cfg.Report == "clients" && !sortByProvided {
+		cfg.SortBy = "count"
 	}
 
 	cfg.GroupBy = strings.TrimSpace(cfg.GroupBy)
@@ -146,6 +150,16 @@ func flagTakesValue(arg string) bool {
 	}
 }
 
+func hasFlag(args []string, name string) bool {
+	prefix := "--" + name
+	for _, arg := range args {
+		if arg == prefix || strings.HasPrefix(arg, prefix+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 func usageText() string {
-	return "usage: mongodb-logstat [--report summary|timeline|queries|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]"
+	return "usage: mongodb-logstat [--report summary|timeline|queries|clients|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]"
 }

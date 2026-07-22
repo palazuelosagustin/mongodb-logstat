@@ -202,6 +202,12 @@ func Execute(cfg Config) (string, int, error) {
 			return "", 1, fmt.Errorf("no input files could be read")
 		}
 		return renderQueries(cfg, report)
+	case "clients":
+		report := computeClients(files, discoveryFailures, cfg)
+		if report.Stats.Diagnostics.FilesRead == 0 {
+			return "", 1, fmt.Errorf("no input files could be read")
+		}
+		return renderClients(cfg, report)
 	case "analysis":
 		report, err := computeAnalysis(files, discoveryFailures, cfg)
 		if err != nil {

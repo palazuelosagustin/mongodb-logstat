@@ -14,9 +14,17 @@ import (
 )
 
 type parseOptions struct {
-	From         *time.Time
-	To           *time.Time
-	OnStructured func(time.Time)
+	From              *time.Time
+	To                *time.Time
+	OnStructured      func(time.Time)
+	OnStructuredEvent func(StructuredEvent)
+}
+
+type StructuredEvent struct {
+	Timestamp  time.Time
+	Raw        map[string]any
+	SourceFile string
+	SourceLine int64
 }
 
 func parseFiles(paths []string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) {
@@ -68,6 +76,9 @@ func parseFile(path string, opts parseOptions, visitor func(*SlowOperation), sta
 			updateObservedRange(&stats.InputObservedFrom, &stats.InputObservedTo, ts)
 			if opts.OnStructured != nil {
 				opts.OnStructured(ts)
+			}
+			if opts.OnStructuredEvent != nil && withinTimeRange(ts, opts.From, opts.To) {
+				opts.OnStructuredEvent(StructuredEvent{Timestamp: ts, Raw: raw, SourceFile: path, SourceLine: lineNumber})
 			}
 		}
 
@@ -258,6 +269,8 @@ func parseSlowOperationDoc(raw map[string]any, path string, lineNumber int64, st
 
 	op := &SlowOperation{
 		Timestamp:          timestamp,
+		Ctx:                sanitizeBoundedString(asString(raw["ctx"]), 128),
+		Remote:             sanitizeBoundedString(asString(attr["remote"]), 256),
 		Namespace:          namespace,
 		Category:           info.Category,
 		Operation:          info.Operation,
@@ -305,6 +318,16 @@ func parseSlowOperationDoc(raw map[string]any, path string, lineNumber int64, st
 		stats.Diagnostics.UnassociatedGetMore++
 	}
 	return op, lineAccepted
+}
+
+func withinTimeRange(ts time.Time, from, to *time.Time) bool {
+	if from != nil && ts.Before(*from) {
+		return false
+	}
+	if to != nil && !ts.Before(*to) {
+		return false
+	}
+	return true
 }
 
 func rejectSlow(stats *PassStats, reason string) {
