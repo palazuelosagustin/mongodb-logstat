@@ -337,7 +337,7 @@ func writeInputStatus(buf *bytes.Buffer, cfg Config, stats PassStats) {
 func writeTerminalMetadata(buf *bytes.Buffer, cfg Config, stats PassStats, slowRange Range, accepted int) {
 	buf.WriteString(fmt.Sprintf("Input files:          %d\n", stats.Diagnostics.FilesDiscovered))
 	buf.WriteString(fmt.Sprintf("Files:                %s\n", strings.Join(stats.InputFiles, ",")))
-	buf.WriteString(fmt.Sprintf("Requested range:      %s to %s\n", formatMaybeTime(cfg.From), formatMaybeTime(cfg.To)))
+	buf.WriteString(fmt.Sprintf("Requested range:      %s to %s\n", formatRequestedTime(cfg.From), formatRequestedTime(cfg.To)))
 	buf.WriteString(fmt.Sprintf("Input log range:      %s to %s\n", formatMaybeTime(stats.InputObservedFrom), formatMaybeTime(stats.InputObservedTo)))
 	buf.WriteString(fmt.Sprintf("Slow-operation range: %s to %s\n", formatMaybeTime(slowRange.From), formatMaybeTime(slowRange.To)))
 	buf.WriteString(fmt.Sprintf("Analysis duration:    %s\n", analysisDurationLabel(cfg, stats, slowRange)))
@@ -364,6 +364,13 @@ func analysisDurationLabel(cfg Config, stats PassStats, slowRange Range) string 
 func formatMaybeTime(ts *time.Time) string {
 	if ts == nil {
 		return "unknown"
+	}
+	return ts.UTC().Format(time.RFC3339)
+}
+
+func formatRequestedTime(ts *time.Time) string {
+	if ts == nil {
+		return "none"
 	}
 	return ts.UTC().Format(time.RFC3339)
 }

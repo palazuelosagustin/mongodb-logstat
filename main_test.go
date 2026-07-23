@@ -144,6 +144,9 @@ func TestPartialInputDiagnosticsAndTerminalHeader(t *testing.T) {
 	if !strings.Contains(reportText, "Input files:          2\nFiles:                good.log,missing.log\nRequested range:") {
 		t.Fatalf("missing file names header:\n%s", reportText)
 	}
+	if !strings.Contains(reportText, "Requested range:      none to none") {
+		t.Fatalf("missing none requested range:\n%s", reportText)
+	}
 
 	reportJSON, _, err := Execute(Config{
 		Report: "summary",
