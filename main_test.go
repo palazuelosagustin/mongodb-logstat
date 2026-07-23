@@ -141,6 +141,9 @@ func TestPartialInputDiagnosticsAndTerminalHeader(t *testing.T) {
 	if !strings.Contains(reportText, "Input status: partial (1/2 files read successfully)") {
 		t.Fatalf("missing partial header:\n%s", reportText)
 	}
+	if !strings.Contains(reportText, "Input files:          2\nFiles:                good.log,missing.log\nRequested range:") {
+		t.Fatalf("missing file names header:\n%s", reportText)
+	}
 
 	reportJSON, _, err := Execute(Config{
 		Report: "summary",

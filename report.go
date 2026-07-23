@@ -278,6 +278,7 @@ func renderSummary(cfg Config, report SummaryReport) (string, int, error) {
 
 	var buf bytes.Buffer
 	writeInputStatus(&buf, cfg, report.Stats)
+	writeTerminalMetadata(&buf, cfg, report.Stats, report.Observed, report.Accepted)
 	buf.WriteString("Summary report\n")
 	buf.WriteString(fmt.Sprintf("Accepted: %d\n", report.Accepted))
 	buf.WriteString(fmt.Sprintf("Logged slow ops/min: %.2f\n", report.OpsPerMinute))
@@ -335,6 +336,7 @@ func writeInputStatus(buf *bytes.Buffer, cfg Config, stats PassStats) {
 
 func writeTerminalMetadata(buf *bytes.Buffer, cfg Config, stats PassStats, slowRange Range, accepted int) {
 	buf.WriteString(fmt.Sprintf("Input files:          %d\n", stats.Diagnostics.FilesDiscovered))
+	buf.WriteString(fmt.Sprintf("Files:                %s\n", strings.Join(stats.InputFiles, ",")))
 	buf.WriteString(fmt.Sprintf("Requested range:      %s to %s\n", formatMaybeTime(cfg.From), formatMaybeTime(cfg.To)))
 	buf.WriteString(fmt.Sprintf("Input log range:      %s to %s\n", formatMaybeTime(stats.InputObservedFrom), formatMaybeTime(stats.InputObservedTo)))
 	buf.WriteString(fmt.Sprintf("Slow-operation range: %s to %s\n", formatMaybeTime(slowRange.From), formatMaybeTime(slowRange.To)))
@@ -604,11 +606,25 @@ func computeQueries(files []string, discoveryFailures []FileFailure, cfg Config)
 }
 
 func newPassStats(files []string, discoveryFailures []FileFailure) PassStats {
-	stats := PassStats{Failures: append([]FileFailure(nil), discoveryFailures...)}
+	stats := PassStats{
+		Failures:   append([]FileFailure(nil), discoveryFailures...),
+		InputFiles: inputFileNames(files, discoveryFailures),
+	}
 	stats.Diagnostics.RejectedByReason = fixedRejectedByReasonMap()
 	stats.Diagnostics.FilesDiscovered = len(files) + len(discoveryFailures)
 	stats.Diagnostics.FilesFailed = len(discoveryFailures)
 	return stats
+}
+
+func inputFileNames(files []string, discoveryFailures []FileFailure) []string {
+	names := make([]string, 0, len(files)+len(discoveryFailures))
+	for _, file := range files {
+		names = append(names, filepath.Base(file))
+	}
+	for _, failure := range discoveryFailures {
+		names = append(names, filepath.Base(failure.Path))
+	}
+	return names
 }
 
 func finalizeStats(stats *PassStats) {

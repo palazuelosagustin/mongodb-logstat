@@ -137,6 +137,7 @@ type FileFailure struct {
 type PassStats struct {
 	Diagnostics       Diagnostics
 	Failures          []FileFailure
+	InputFiles        []string
 	InputObservedFrom *time.Time
 	InputObservedTo   *time.Time
 }
