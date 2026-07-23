@@ -28,7 +28,7 @@ Flags may appear before or after input paths.
 Usage syntax:
 
 ```text
-mongodb-logstat [--report summary|timeline|queries|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 Accepted inputs:
@@ -37,11 +37,11 @@ Accepted inputs:
 - mixed files and directories
 
 Defaults:
-- `--report summary`, deprecated compatibility path
+- `--report` is required; there is no default report
 - `--bucket 1h`
 - `--group-by optype`
-- `--top` unset means default top `20` for `queries`, query-grouped timelines, and `analysis`; `--top 0` means all
-- `--sort-by total-duration`
+- `--top` unset means default top `20` for `queries`, query-grouped timelines, and `analysis`; `clients` defaults to all correlated user/client groups; `--top 0` means all
+- `--sort-by total-duration` for queries and analysis; `clients` defaults to `count`
 - `--include-internal false`
 - `--fill-gaps true`
 - `--max-buckets 10000`
@@ -51,14 +51,14 @@ Defaults:
 - `--to` unset
 
 Flag details:
-- `--report`: `summary`, `timeline`, `queries`, or `analysis`
+- `--report`: required; `timeline`, `queries`, `clients`, or `analysis`
 - `--json`: emit JSON for v1 reports; `analysis` is always JSON
 - `--from`: inclusive RFC3339 lower time bound
 - `--to`: exclusive RFC3339 upper time bound
 - `--bucket`: positive Go duration string, such as `30m`, `1h`, or `2h`
 - `--group-by`: `optype`, `namespace`, `query`, or `category`; used by `timeline`
 - `--top`: non-negative integer; `0` prints all selected rows or columns
-- `--sort-by`: query ranking key: `total-duration`, `count`, `p95`, `max`, or `docs-examined`
+- `--sort-by`: query/client ranking key: `total-duration`, `count`, `p95`, `max`, or `docs-examined`
 - `--include-internal`: include internal commands in main query ranking; internal activity is summarized separately by `analysis`
 - `--fill-gaps`: emit zero-slow-operation timeline buckets in `analysis`
 - `--max-buckets`: reject `analysis` output that would exceed this bucket count
@@ -95,6 +95,12 @@ Common flags:
 - `--sort-by total-duration` to rank by cumulative slow duration
 - `--sort-by count`, `p95`, `max`, or `docs-examined` for alternate rankings
 
+Choose `clients` when the user wants slow operations correlated to MongoDB connection, client metadata, and authenticated users.
+Common flags:
+- `--top N` to limit user/client groups; omit it for all correlated groups
+- `--sort-by count` to rank by slow-operation count
+- `--sort-by total-duration`, `p95`, `max`, or `docs-examined` for alternate rankings
+
 Choose `analysis` when the user wants compact AI-ready JSON without raw logs.
 Common flags:
 - `--bucket 30m` for FTDC correlation windows
@@ -103,28 +109,26 @@ Common flags:
 - `--include-internal` only if internal commands should be in main query ranking
 - `--max-buckets N` if the requested range is very large
 
-Avoid `summary` for new workflows. It is one-pass and deprecated; it still prints accepted slow-op count, logged slow ops/min, and latency stats.
-
 ## Default Commands
 
 Use these commands when the user asks how to run each report type to an output file with default parameters:
 
 ```bash
-./mongodb-logstat --report summary /path/to/mongod.log > summary_report.txt
 ./mongodb-logstat --report timeline /path/to/mongod.log > timeline_report.txt
 ./mongodb-logstat --report queries /path/to/mongod.log > queries_report.txt
+./mongodb-logstat --report clients /path/to/mongod.log > clients_report.txt
 ./mongodb-logstat --report analysis /path/to/mongod.log > analysis_report.json
 ```
 
 JSON v1 reports:
 
 ```bash
-./mongodb-logstat --report summary --json /path/to/mongod.log > summary_report.json
 ./mongodb-logstat --report timeline --json /path/to/mongod.log > timeline_report.json
 ./mongodb-logstat --report queries --json /path/to/mongod.log > queries_report.json
+./mongodb-logstat --report clients --json /path/to/mongod.log > clients_report.json
 ```
 
-Capture stderr separately when needed because partial-input details and the summary deprecation warning go to stderr:
+Capture stderr separately when needed because partial-input details go to stderr:
 
 ```bash
 ./mongodb-logstat --report timeline --verbose /path/to/mongod.log > timeline_report.txt 2> timeline_errors.txt
@@ -137,6 +141,7 @@ Capture stderr separately when needed because partial-input details and the summ
 ./mongodb-logstat --report timeline --bucket 30m --group-by query --top 10 /path/to/mongod.log
 ./mongodb-logstat --report queries --top 10 --sort-by total-duration /path/to/mongod.log
 ./mongodb-logstat --report queries --top 0 --sort-by count /path/to/mongod.log
+./mongodb-logstat --report clients --top 20 --sort-by count /path/to/mongod.log
 ./mongodb-logstat --report analysis --bucket 30m --top 20 /path/to/mongod.log > mongodb-analysis.json
 ./mongodb-logstat --report analysis --from 2026-07-14T21:00:00Z --to 2026-07-14T23:00:00Z /path/to/mongod.log > mongodb-analysis.json
 ```
@@ -144,8 +149,8 @@ Capture stderr separately when needed because partial-input details and the summ
 ## Output Semantics
 
 Keep these behaviors in mind when explaining results:
-- `timeline`, `queries`, and `analysis` use normalized operations; raw internal command names such as `configTerm` do not appear as normal workload operations.
-- `summary` is one-pass; `timeline` and `queries` are two-pass; `analysis` emits schema-version-2 JSON.
+- `timeline`, `queries`, `clients`, and `analysis` use normalized operations; raw internal command names such as `configTerm` do not appear as normal workload operations.
+- `timeline` and `queries` are two-pass; `analysis` emits schema-version-2 JSON.
 - Query identity precedence is `queryShapeHash`, `planCacheShapeHash`, `queryHash`, then local deterministic privacy-safe canonical hash.
 - `planCacheKey` is plan-variant evidence, not query identity.
 - Query labels are `operation:namespace#short-shape-id`; they never render `#null`.

@@ -51,21 +51,6 @@ type summaryTopItem struct {
 	Count int    `json:"count"`
 }
 
-type summaryTotals struct {
-	Accepted     int     `json:"accepted"`
-	OpsPerMinute float64 `json:"opsPerMinute"`
-}
-
-type summaryReportJSON struct {
-	reportEnvelope
-	Totals           summaryTotals    `json:"totals"`
-	LatencyMs        LatencySummary   `json:"latencyMs"`
-	TopOperations    []summaryTopItem `json:"topOperations"`
-	TopNamespaces    []summaryTopItem `json:"topNamespaces"`
-	Plans            map[string]int   `json:"plans"`
-	TruncatedRecords int              `json:"truncatedRecords"`
-}
-
 type queriesRowJSON struct {
 	ShapeID    *string `json:"shapeId"`
 	Label      string  `json:"label"`
@@ -90,18 +75,6 @@ type TimelineReport struct {
 	Observed Range
 	Stats    PassStats
 	Accepted int
-}
-
-type SummaryReport struct {
-	Accepted     int
-	Observed     Range
-	Stats        PassStats
-	Latency      LatencySummary
-	TopOps       []summaryTopItem
-	TopNS        []summaryTopItem
-	Plans        map[string]int
-	Truncated    int
-	OpsPerMinute float64
 }
 
 type QueriesReport struct {
@@ -184,12 +157,6 @@ type metricBundle struct {
 func Execute(cfg Config) (string, int, error) {
 	files, discoveryFailures := discoverInputs(cfg.Inputs)
 	switch cfg.Report {
-	case "summary":
-		report := computeSummary(files, discoveryFailures, cfg)
-		if report.Stats.Diagnostics.FilesRead == 0 {
-			return "", 1, fmt.Errorf("no input files could be read")
-		}
-		return renderSummary(cfg, report)
 	case "timeline":
 		report := computeTimeline(files, discoveryFailures, cfg)
 		if report.Stats.Diagnostics.FilesRead == 0 {
@@ -258,37 +225,6 @@ func renderTimeline(cfg Config, report TimelineReport) (string, int, error) {
 	}
 	if err := bl.Flush(); err != nil {
 		return "", 1, err
-	}
-	return buf.String(), 0, nil
-}
-
-func renderSummary(cfg Config, report SummaryReport) (string, int, error) {
-	if cfg.JSON {
-		body := summaryReportJSON{
-			reportEnvelope:   newEnvelope("summary", cfg, report.Observed, report.Stats.Diagnostics),
-			Totals:           summaryTotals{Accepted: report.Accepted, OpsPerMinute: report.OpsPerMinute},
-			LatencyMs:        report.Latency,
-			TopOperations:    report.TopOps,
-			TopNamespaces:    report.TopNS,
-			Plans:            report.Plans,
-			TruncatedRecords: report.Truncated,
-		}
-		return marshalJSON(body)
-	}
-
-	var buf bytes.Buffer
-	writeInputStatus(&buf, cfg, report.Stats)
-	writeTerminalMetadata(&buf, cfg, report.Stats, report.Observed, report.Accepted)
-	buf.WriteString("Summary report\n")
-	buf.WriteString(fmt.Sprintf("Accepted: %d\n", report.Accepted))
-	buf.WriteString(fmt.Sprintf("Logged slow ops/min: %.2f\n", report.OpsPerMinute))
-	if report.Latency.Min == nil {
-		buf.WriteString("Latency ms: n/a\n")
-	} else {
-		buf.WriteString(fmt.Sprintf(
-			"Latency ms: min=%d avg=%.1f p50=%d p95=%d p99=%d max=%d approx=%t\n",
-			*report.Latency.Min, *report.Latency.Avg, *report.Latency.P50, *report.Latency.P95, *report.Latency.P99, *report.Latency.Max, report.Latency.Approximate,
-		))
 	}
 	return buf.String(), 0, nil
 }
@@ -403,44 +339,6 @@ func inputStatus(filesRead, filesFailed int) string {
 		return "partial"
 	default:
 		return "complete"
-	}
-}
-
-func computeSummary(files []string, discoveryFailures []FileFailure, cfg Config) SummaryReport {
-	stats := newPassStats(files, discoveryFailures)
-
-	var hist DurationHistogram
-	opCounts := map[string]int{}
-	nsCounts := map[string]int{}
-	planCounts := map[string]int{}
-	truncatedRecords := 0
-	accepted := 0
-	var observedFrom *time.Time
-	var observedTo *time.Time
-
-	parseFiles(files, parseOptions{From: cfg.From, To: cfg.To}, func(op *SlowOperation) {
-		accepted++
-		hist.Add(op.Duration)
-		opCounts[op.Operation]++
-		nsCounts[op.Namespace]++
-		planCounts[op.PlanSummary]++
-		if op.Truncated {
-			truncatedRecords++
-		}
-		updateObservedRange(&observedFrom, &observedTo, op.Timestamp)
-	}, &stats)
-
-	finalizeStats(&stats)
-	return SummaryReport{
-		Accepted:     accepted,
-		Observed:     Range{From: observedFrom, To: observedTo},
-		Stats:        stats,
-		Latency:      hist.Summary(true),
-		TopOps:       topCounts(opCounts, effectiveTop(cfg, "summary")),
-		TopNS:        topCounts(nsCounts, effectiveTop(cfg, "summary")),
-		Plans:        sortedCountMap(planCounts),
-		Truncated:    truncatedRecords,
-		OpsPerMinute: computeOpsPerMinute(cfg.From, cfg.To, observedFrom, observedTo, accepted),
 	}
 }
 
@@ -919,32 +817,6 @@ func analysisRates(accepted int64, durationSeconds int64) AnalysisRates {
 	seconds := durationSeconds
 	rate := float64(accepted) / (float64(durationSeconds) / 60)
 	return AnalysisRates{OverAnalysisRange: AnalysisRate{LoggedSlowOperationsPerMinute: &rate, DenominatorSeconds: &seconds, Denominator: den}}
-}
-
-func computeOpsPerMinute(from, to, observedFrom, observedTo *time.Time, accepted int) float64 {
-	if accepted == 0 {
-		return 0
-	}
-
-	var minutes float64
-	if from != nil && to != nil {
-		minutes = to.Sub(*from).Minutes()
-		if minutes < 1 {
-			minutes = 1
-		}
-		return float64(accepted) / minutes
-	}
-
-	if observedFrom == nil || observedTo == nil {
-		return 0
-	}
-
-	duration := observedTo.Sub(*observedFrom)
-	minutes = float64((duration + time.Minute - 1) / time.Minute)
-	if minutes < 1 {
-		minutes = 1
-	}
-	return float64(accepted) / minutes
 }
 
 func updateObservedRange(from, to **time.Time, ts time.Time) {

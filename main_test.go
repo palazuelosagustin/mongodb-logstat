@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,7 @@ func TestOversizedLineDoesNotStopParsing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := computeSummary([]string{path}, nil, Config{Top: 10})
+	report := computeTimeline([]string{path}, nil, Config{Report: "timeline", Top: 10, Bucket: time.Hour, GroupBy: "optype"})
 	if report.Accepted != 2 {
 		t.Fatalf("accepted=%d want 2", report.Accepted)
 	}
@@ -131,9 +132,11 @@ func TestPartialInputDiagnosticsAndTerminalHeader(t *testing.T) {
 	missingPath := filepath.Join(dir, "missing.log")
 
 	reportText, _, err := Execute(Config{
-		Report: "summary",
-		Top:    10,
-		Inputs: []string{validPath, missingPath},
+		Report:  "timeline",
+		Top:     10,
+		Bucket:  time.Hour,
+		GroupBy: "optype",
+		Inputs:  []string{validPath, missingPath},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -149,10 +152,12 @@ func TestPartialInputDiagnosticsAndTerminalHeader(t *testing.T) {
 	}
 
 	reportJSON, _, err := Execute(Config{
-		Report: "summary",
-		Top:    10,
-		JSON:   true,
-		Inputs: []string{validPath, missingPath},
+		Report:  "timeline",
+		Top:     10,
+		Bucket:  time.Hour,
+		GroupBy: "optype",
+		JSON:    true,
+		Inputs:  []string{validPath, missingPath},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +181,7 @@ func TestNoMatchJSONContracts(t *testing.T) {
 	from := mustTime(t, "2026-07-17T11:00:00Z")
 	to := mustTime(t, "2026-07-17T12:00:00Z")
 
-	for _, report := range []string{"summary", "timeline", "queries"} {
+	for _, report := range []string{"timeline", "queries"} {
 		t.Run(report, func(t *testing.T) {
 			out, _, err := Execute(Config{
 				Report:  report,
@@ -199,11 +204,6 @@ func TestNoMatchJSONContracts(t *testing.T) {
 				t.Fatalf("schemaVersion=%v", body["schemaVersion"])
 			}
 			switch report {
-			case "summary":
-				latency := body["latencyMs"].(map[string]any)
-				if latency["min"] != nil || latency["avg"] != nil {
-					t.Fatalf("expected null latency fields: %+v", latency)
-				}
 			case "timeline":
 				rows := body["rows"].([]any)
 				if len(rows) != 0 {
@@ -317,30 +317,6 @@ func TestQueriesTwoPassTopNAndLatency(t *testing.T) {
 	}
 	if row.P95Ms != 900 || row.MaxMs != 900 {
 		t.Fatalf("p95=%d max=%d want 900/900", row.P95Ms, row.MaxMs)
-	}
-}
-
-func TestSummaryRateSemantics(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "mongo.log")
-	lines := []string{
-		slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil),
-		slowLine("2026-07-17T10:00:30Z", "find", "shop", "orders", 100, nil),
-	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	report := computeSummary([]string{path}, nil, Config{Top: 10})
-	if report.OpsPerMinute != 2 {
-		t.Fatalf("opsPerMinute=%v want 2", report.OpsPerMinute)
-	}
-
-	from := mustTime(t, "2026-07-17T10:00:00Z")
-	to := mustTime(t, "2026-07-17T10:10:00Z")
-	report = computeSummary([]string{path}, nil, Config{Top: 10, From: &from, To: &to})
-	if report.OpsPerMinute != 0.2 {
-		t.Fatalf("opsPerMinute=%v want 0.2", report.OpsPerMinute)
 	}
 }
 
@@ -640,6 +616,34 @@ func TestParseCLIClientsDefaultSortByCount(t *testing.T) {
 	}
 	if cfg.SortBy != "p95" {
 		t.Fatalf("explicit clients sortBy=%q want p95", cfg.SortBy)
+	}
+}
+
+func TestParseCLIRequiresReport(t *testing.T) {
+	_, err := parseCLI([]string{"/tmp/mongo.log"})
+	if !errors.Is(err, errUsage) {
+		t.Fatalf("err=%v want errUsage", err)
+	}
+}
+
+func TestParseCLIRejectsSummaryReport(t *testing.T) {
+	_, err := parseCLI([]string{"/tmp/mongo.log", "--report", "summary"})
+	if err == nil || !strings.Contains(err.Error(), "invalid --report: \"summary\"") {
+		t.Fatalf("err=%v want invalid summary report", err)
+	}
+}
+
+func TestParseCLIValidReports(t *testing.T) {
+	for _, report := range []string{"timeline", "queries", "clients", "analysis"} {
+		t.Run(report, func(t *testing.T) {
+			cfg, err := parseCLI([]string{"/tmp/mongo.log", "--report", report})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Report != report {
+				t.Fatalf("report=%q want %q", cfg.Report, report)
+			}
+		})
 	}
 }
 

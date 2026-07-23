@@ -15,13 +15,14 @@ go build -o mongodb-logstat .
 ## Usage
 
 ```text
-mongodb-logstat [--report timeline|queries|clients|analysis] [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 Flags may appear before or after input paths. Inputs can be files, directories, or a mix of both.
 
-Important defaults:
+Important behavior and defaults:
 
+- `--report` is required and must be one of `timeline`, `queries`, `clients`, or `analysis`.
 - `--bucket 1h`.
 - `--group-by optype`.
 - `--top` defaults to `20` for `queries`, query-grouped timelines, and `analysis`; `clients` defaults to all correlated user/client groups unless `--top` is set; use `--top 0` for all shapes/groups.
