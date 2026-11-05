@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -155,25 +156,31 @@ type metricBundle struct {
 }
 
 func Execute(cfg Config) (string, int, error) {
-	files, discoveryFailures := discoverInputs(cfg.Inputs)
+	files, discoveryFailures, skipped := discoverInputs(cfg.Inputs)
 	switch cfg.Report {
 	case "timeline":
 		report := computeTimeline(files, discoveryFailures, cfg)
 		if report.Stats.Diagnostics.FilesRead == 0 {
-			return "", 1, fmt.Errorf("no input files could be read")
+			return "", 1, noReadableInputError(files, discoveryFailures, skipped)
 		}
+		report.Stats.Skipped = skipped
+		report.Stats.Diagnostics.FilesSkipped = len(skipped)
 		return renderTimeline(cfg, report)
 	case "queries":
 		report := computeQueries(files, discoveryFailures, cfg)
 		if report.Stats.Diagnostics.FilesRead == 0 {
-			return "", 1, fmt.Errorf("no input files could be read")
+			return "", 1, noReadableInputError(files, discoveryFailures, skipped)
 		}
+		report.Stats.Skipped = skipped
+		report.Stats.Diagnostics.FilesSkipped = len(skipped)
 		return renderQueries(cfg, report)
 	case "clients":
 		report := computeClients(files, discoveryFailures, cfg)
 		if report.Stats.Diagnostics.FilesRead == 0 {
-			return "", 1, fmt.Errorf("no input files could be read")
+			return "", 1, noReadableInputError(files, discoveryFailures, skipped)
 		}
+		report.Stats.Skipped = skipped
+		report.Stats.Diagnostics.FilesSkipped = len(skipped)
 		return renderClients(cfg, report)
 	case "analysis":
 		report, err := computeAnalysis(files, discoveryFailures, cfg)
@@ -181,12 +188,45 @@ func Execute(cfg Config) (string, int, error) {
 			return "", 1, err
 		}
 		if report.Diagnostics.InputFilesRead == 0 {
-			return "", 1, fmt.Errorf("no input files could be read")
+			return "", 1, noReadableInputError(files, discoveryFailures, skipped)
 		}
+		report.Diagnostics.InputFilesSkipped = len(skipped)
 		return marshalJSON(report)
 	default:
 		return "", 2, fmt.Errorf("unsupported report: %s", cfg.Report)
 	}
+}
+
+// noReadableInputError explains why nothing could be read, so a wrong input
+// (legacy text log, FTDC directory, typo) is not mistaken for an empty log.
+func noReadableInputError(files []string, discoveryFailures []FileFailure, skipped []string) error {
+	reasons := append([]FileFailure(nil), discoveryFailures...)
+	for _, path := range files {
+		format, err := sniffLogFile(path)
+		switch {
+		case err != nil:
+			reasons = append(reasons, FileFailure{Path: path, Reason: err.Error()})
+		case format == formatLegacy:
+			reasons = append(reasons, FileFailure{Path: path, Reason: errLegacyTextLog.Error()})
+		case format == formatUnknown:
+			reasons = append(reasons, FileFailure{Path: path, Reason: errNotMongoLog.Error()})
+		}
+	}
+	var b strings.Builder
+	b.WriteString("no input files could be read")
+	if len(files) == 0 && len(discoveryFailures) == 0 && len(skipped) > 0 {
+		fmt.Fprintf(&b, ": no MongoDB log files found (%d non-log files skipped, e.g. %s)", len(skipped), skipped[0])
+		return errors.New(b.String())
+	}
+	const maxShown = 3
+	for i, r := range reasons {
+		if i == maxShown {
+			fmt.Fprintf(&b, "\n  ... and %d more", len(reasons)-maxShown)
+			break
+		}
+		fmt.Fprintf(&b, "\n  %s: %s", r.Path, r.Reason)
+	}
+	return errors.New(b.String())
 }
 
 func renderTimeline(cfg Config, report TimelineReport) (string, int, error) {
@@ -267,11 +307,17 @@ func writeInputStatus(buf *bytes.Buffer, cfg Config, stats PassStats) {
 		for _, failure := range stats.Failures {
 			buf.WriteString(fmt.Sprintf("stderr: %s: %s\n", failure.Path, failure.Reason))
 		}
+		for _, path := range stats.Skipped {
+			buf.WriteString(fmt.Sprintf("stderr: %s: skipped, not a MongoDB log\n", path))
+		}
 	}
 }
 
 func writeTerminalMetadata(buf *bytes.Buffer, cfg Config, stats PassStats, slowRange Range, accepted int) {
 	buf.WriteString(fmt.Sprintf("Input files:          %d\n", stats.Diagnostics.FilesDiscovered))
+	if len(stats.Skipped) > 0 {
+		buf.WriteString(fmt.Sprintf("Skipped files:        %d not MongoDB logs (--verbose lists them)\n", len(stats.Skipped)))
+	}
 	buf.WriteString(fmt.Sprintf("Files:                %s\n", strings.Join(stats.InputFiles, ",")))
 	buf.WriteString(fmt.Sprintf("Requested range:      %s to %s\n", formatRequestedTime(cfg.From), formatRequestedTime(cfg.To)))
 	buf.WriteString(fmt.Sprintf("Input log range:      %s to %s\n", formatMaybeTime(stats.InputObservedFrom), formatMaybeTime(stats.InputObservedTo)))
@@ -1100,6 +1146,7 @@ type AnalysisDiagnostics struct {
 	InputFilesDiscovered      int              `json:"inputFilesDiscovered"`
 	InputFilesRead            int              `json:"inputFilesRead"`
 	InputFilesFailed          int              `json:"inputFilesFailed"`
+	InputFilesSkipped         int              `json:"inputFilesSkipped"`
 	LinesRead                 int64            `json:"linesRead"`
 	ValidStructuredLines      int64            `json:"validStructuredLines"`
 	SlowQueryLines            int64            `json:"slowQueryLines"`

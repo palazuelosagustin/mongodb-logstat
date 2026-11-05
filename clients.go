@@ -258,8 +258,8 @@ func captureClientMetadata(raw map[string]any, connections map[string]*clientCon
 	if ctx == "" {
 		return
 	}
-	msg := strings.ToLower(asString(raw["msg"]))
-	if msg != "connection accepted" && msg != "connection ended" && msg != "client metadata" && msg != "authentication succeeded" {
+	msg := clientEventKind(raw)
+	if msg == "" {
 		return
 	}
 	attr, _ := raw["attr"].(map[string]any)
@@ -301,16 +301,56 @@ func captureClientMetadata(raw map[string]any, connections map[string]*clientCon
 			conn.OSVersion = value
 		}
 	case "authentication succeeded":
-		if value := sanitizeClientValue(asString(attr["principalName"])); value != "" {
+		// 4.4 logs principalName/authenticationDatabase; 5.0+ logs user/db.
+		if value := sanitizeClientValue(firstString(attr, "principalName", "user")); value != "" {
 			conn.PrincipalName = value
 		}
-		if value := sanitizeClientValue(asString(attr["authenticationDatabase"])); value != "" {
+		if value := sanitizeClientValue(firstString(attr, "authenticationDatabase", "db")); value != "" {
 			conn.AuthenticationDatabase = value
 		}
 		if value := sanitizeClientValue(asString(attr["mechanism"])); value != "" {
 			conn.Mechanism = value
 		}
 	}
+}
+
+// Structured-log ids of the connection events the clients report uses.
+// Authentication success is id 20250 in 4.4 and 5286306 in 5.0+, and its
+// message changed between releases, so ids are matched first.
+var clientEventIDs = map[int64]string{
+	22943:   "connection accepted",
+	22944:   "connection ended",
+	51800:   "client metadata",
+	20250:   "authentication succeeded",
+	5286306: "authentication succeeded",
+}
+
+var clientEventMessages = map[string]string{
+	"connection accepted":        "connection accepted",
+	"connection ended":           "connection ended",
+	"client metadata":            "client metadata",
+	"authentication succeeded":   "authentication succeeded",
+	"successfully authenticated": "authentication succeeded",
+}
+
+// clientEventKind returns the normalized event name for a connection event
+// line, or "" when the line is not one.
+func clientEventKind(raw map[string]any) string {
+	if id, ok := asInt64(raw["id"]); ok {
+		if kind, ok := clientEventIDs[id]; ok {
+			return kind
+		}
+	}
+	return clientEventMessages[strings.ToLower(strings.TrimSpace(asString(raw["msg"])))]
+}
+
+func firstString(attr map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := asString(attr[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (a *clientAgg) add(op *SlowOperation, conn *clientConnectionInfo, remote string) {

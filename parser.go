@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,13 +38,19 @@ func parseFiles(paths []string, opts parseOptions, visitor func(*SlowOperation),
 }
 
 func parseFile(path string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) error {
-	f, err := os.Open(path)
+	src, format, closeFn, err := openLog(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer closeFn()
+	switch format {
+	case formatLegacy:
+		return errLegacyTextLog
+	case formatUnknown:
+		return errNotMongoLog
+	}
 
-	reader := bufio.NewReader(f)
+	reader := bufio.NewReader(src)
 	var lineNumber int64
 	for {
 		line, oversized, err := readLogicalLine(reader, maxLogicalLineBytes)
@@ -182,8 +187,7 @@ func parseSlowOperationLine(line []byte, path string, lineNumber int64, stats *P
 }
 
 func parseSlowOperationDoc(raw map[string]any, path string, lineNumber int64, stats *PassStats) (*SlowOperation, lineStatus) {
-	msg := asString(raw["msg"])
-	if !strings.Contains(strings.ToLower(msg), "slow") {
+	if !isSlowQueryLine(raw) {
 		stats.Diagnostics.NonSlowStructuredLines++
 		stats.Diagnostics.RecordsRejected++
 		return nil, lineRejected
@@ -321,6 +325,18 @@ func parseSlowOperationDoc(raw map[string]any, path string, lineNumber int64, st
 		stats.Diagnostics.UnassociatedGetMore++
 	}
 	return op, lineAccepted
+}
+
+// slowQueryLogID is the structured-log id of "Slow query" (MongoDB 4.4+,
+// mongod and mongos). Other messages that mention "slow" (for example
+// "Slow connection establishment", id 6496400) are not operations.
+const slowQueryLogID = 51803
+
+func isSlowQueryLine(raw map[string]any) bool {
+	if id, ok := asInt64(raw["id"]); ok {
+		return id == slowQueryLogID
+	}
+	return strings.EqualFold(strings.TrimSpace(asString(raw["msg"])), "slow query")
 }
 
 func withinTimeRange(ts time.Time, from, to *time.Time) bool {

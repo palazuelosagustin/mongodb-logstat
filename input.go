@@ -8,9 +8,14 @@ import (
 	"sort"
 )
 
-func discoverInputs(inputs []string) ([]string, []FileFailure) {
+// discoverInputs expands the command-line inputs into log files. Files named
+// directly are always returned (and fail later if they are not logs). Files
+// found by walking a directory are sniffed first: anything that is not a
+// MongoDB log (FTDC, archives, notes) is returned in skipped instead.
+func discoverInputs(inputs []string) ([]string, []FileFailure, []string) {
 	var files []string
 	var failures []FileFailure
+	var skipped []string
 
 	for _, input := range inputs {
 		info, err := os.Stat(input)
@@ -34,9 +39,19 @@ func discoverInputs(inputs []string) ([]string, []FileFailure) {
 				failures = append(failures, FileFailure{Path: path, Reason: walkErr.Error()})
 				return nil
 			}
-			if d.Type().IsRegular() {
-				files = append(files, path)
+			if !d.Type().IsRegular() {
+				return nil
 			}
+			format, err := sniffLogFile(path)
+			if err != nil {
+				failures = append(failures, FileFailure{Path: path, Reason: err.Error()})
+				return nil
+			}
+			if format == formatUnknown {
+				skipped = append(skipped, path)
+				return nil
+			}
+			files = append(files, path)
 			return nil
 		})
 		if err != nil && !errors.Is(err, fs.ErrPermission) {
@@ -45,5 +60,6 @@ func discoverInputs(inputs []string) ([]string, []FileFailure) {
 	}
 
 	sort.Strings(files)
-	return files, failures
+	sort.Strings(skipped)
+	return files, failures, skipped
 }

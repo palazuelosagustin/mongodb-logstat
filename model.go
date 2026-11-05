@@ -108,6 +108,7 @@ type Diagnostics struct {
 	FilesDiscovered                int              `json:"filesDiscovered"`
 	FilesRead                      int              `json:"filesRead"`
 	FilesFailed                    int              `json:"filesFailed"`
+	FilesSkipped                   int              `json:"filesSkipped,omitempty"`
 	LinesRead                      int64            `json:"linesRead"`
 	LinesMalformed                 int64            `json:"linesMalformed"`
 	RecordsRejected                int64            `json:"recordsRejected"`
@@ -138,6 +139,7 @@ type PassStats struct {
 	Diagnostics       Diagnostics
 	Failures          []FileFailure
 	InputFiles        []string
+	Skipped           []string
 	InputObservedFrom *time.Time
 	InputObservedTo   *time.Time
 }

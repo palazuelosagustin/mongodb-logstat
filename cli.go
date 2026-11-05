@@ -32,8 +32,8 @@ func parseCLI(args []string) (Config, error) {
 	fs.SetOutput(io.Discard)
 
 	cfg := Config{Top: -1, FillGaps: true, MaxBuckets: 10000}
-	from := fs.String("from", "", "RFC3339 lower time bound")
-	to := fs.String("to", "", "RFC3339 upper time bound")
+	from := fs.String("from", "", "lower time bound: RFC3339, or UTC without zone")
+	to := fs.String("to", "", "upper time bound: RFC3339, or UTC without zone")
 	bucket := fs.String("bucket", "1h", "timeline bucket size")
 	fs.StringVar(&cfg.Report, "report", "", "timeline|queries|clients|analysis")
 	fs.StringVar(&cfg.GroupBy, "group-by", "optype", "timeline grouping: optype|namespace|query|category")
@@ -85,14 +85,14 @@ func parseCLI(args []string) (Config, error) {
 	}
 
 	if *from != "" {
-		parsed, err := time.Parse(time.RFC3339, *from)
+		parsed, err := parseTimeArg(*from)
 		if err != nil {
 			return Config{}, fmt.Errorf("invalid --from: %w", err)
 		}
 		cfg.From = &parsed
 	}
 	if *to != "" {
-		parsed, err := time.Parse(time.RFC3339, *to)
+		parsed, err := parseTimeArg(*to)
 		if err != nil {
 			return Config{}, fmt.Errorf("invalid --to: %w", err)
 		}
@@ -114,6 +114,22 @@ func parseCLI(args []string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseTimeArg accepts RFC3339, or a timestamp without a zone, which is read
+// as UTC (MongoDB logs are usually in UTC), matching mongodb-ftdcstat.
+func parseTimeArg(value string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05Z07:00"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t, nil
+		}
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("%q: expected RFC3339 (2026-11-04T13:30:00Z) or a UTC time without zone (2026-11-04T13:30, 2026-11-04)", value)
 }
 
 func normalizeCLIArgs(args []string) []string {
@@ -165,5 +181,5 @@ func hasFlag(args []string, name string) bool {
 }
 
 func usageText() string {
-	return "usage: mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]"
+	return "usage: mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]"
 }

@@ -15,10 +15,18 @@ go build -o mongodb-logstat .
 ## Usage
 
 ```text
-mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 Flags may appear before or after input paths. Inputs can be files, directories, or a mix of both.
+
+Input handling:
+
+- Only structured JSON logs (MongoDB 4.4 and later) are analyzed. A legacy plain-text log (MongoDB 4.2 or older) is reported as a failed file with that reason; if no file can be read, the command exits 1 and lists why.
+- Gzip-compressed logs (for example rotated `mongod.log.1.gz`) are decompressed while reading.
+- Directories are walked recursively. Files that are not MongoDB logs, such as FTDC files in `diagnostic.data/`, are skipped: the header shows `Skipped files: N`, JSON shows `filesSkipped` (`inputFilesSkipped` in `analysis`), and `--verbose` lists them. A file named directly on the command line is never skipped; it fails if it is not a log.
+- Slow operations are the `Slow query` lines (log id `51803`). Other messages that mention "slow", such as `Slow connection establishment`, are not counted.
+- `--from` and `--to` accept RFC3339 (`2026-11-04T13:30:00Z`, `2026-11-04T10:30:00-03:00`) or a time without a zone, which is read as UTC (`2026-11-04T13:30`, `2026-11-04 13:30:00`, `2026-11-04`).
 
 Important behavior and defaults:
 
@@ -59,7 +67,7 @@ Rows include `label`, `count`, `avg_ms`, `p95_ms`, `max_ms`, dominant `plan`, an
 
 ### `clients`
 
-Terminal or JSON report that correlates accepted logged slow operations to MongoDB connection, client metadata, and authentication events by exact log context such as `ctx:"conn188052"`. It never attributes by client IP alone. Slow operations without matching in-range connection metadata are counted as uncorrelated.
+Terminal or JSON report that correlates accepted logged slow operations to MongoDB connection, client metadata, and authentication events (matched by log id, so 4.4 and 5.0+ authentication messages both work) by exact log context such as `ctx:"conn188052"`. It never attributes by client IP alone. Slow operations without matching in-range connection metadata are counted as uncorrelated.
 
 ```bash
 ./mongodb-logstat --report clients /path/to/mongod.log
