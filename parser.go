@@ -27,8 +27,9 @@ type StructuredEvent struct {
 }
 
 func parseFiles(paths []string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) {
+	labels := fileLabels(paths)
 	for _, path := range paths {
-		if err := parseFile(path, opts, visitor, stats); err != nil {
+		if err := parseFile(path, labels[path], opts, visitor, stats); err != nil {
 			stats.Failures = append(stats.Failures, FileFailure{Path: path, Reason: err.Error()})
 			stats.Diagnostics.FilesFailed++
 			continue
@@ -37,7 +38,9 @@ func parseFiles(paths []string, opts parseOptions, visitor func(*SlowOperation),
 	}
 }
 
-func parseFile(path string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) error {
+// parseFile reads one log. label is the short, unique name used for the file
+// in sample references (see fileLabels).
+func parseFile(path, label string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) error {
 	src, format, closeFn, err := openLog(path)
 	if err != nil {
 		return err
@@ -72,6 +75,9 @@ func parseFile(path string, opts parseOptions, visitor func(*SlowOperation), sta
 		if len(line) == 0 {
 			continue
 		}
+		if i := structuredStart(line); i > 0 {
+			line = line[i:]
+		}
 
 		raw, ok := parseStructuredLine(line, stats)
 		if !ok {
@@ -83,11 +89,11 @@ func parseFile(path string, opts parseOptions, visitor func(*SlowOperation), sta
 				opts.OnStructured(ts)
 			}
 			if opts.OnStructuredEvent != nil && withinTimeRange(ts, opts.From, opts.To) {
-				opts.OnStructuredEvent(StructuredEvent{Timestamp: ts, Raw: raw, SourceFile: path, SourceLine: lineNumber})
+				opts.OnStructuredEvent(StructuredEvent{Timestamp: ts, Raw: raw, SourceFile: label, SourceLine: lineNumber})
 			}
 		}
 
-		op, status := parseSlowOperationDoc(raw, path, lineNumber, stats)
+		op, status := parseSlowOperationDoc(raw, label, lineNumber, stats)
 		if status == lineRejected {
 			continue
 		}
@@ -497,6 +503,16 @@ func isExcludedCommand(commandName string) bool {
 
 func deriveNamespace(ns, commandName string, command map[string]any) string {
 	ns = strings.TrimSpace(ns)
+	if strings.HasSuffix(ns, ".$cmd") {
+		// 5.0+ logs slow update/delete commands with ns "<db>.$cmd"; the
+		// collection is in the command document.
+		// A collection starting with "$" (getMore on "$cmd.aggregate", a
+		// database-level cursor) has no better namespace than the logged one.
+		if derived := deriveNamespace("", commandName, command); derived != "<unknown>" && !strings.HasPrefix(derived, "db.") && !strings.Contains(derived, ".$") {
+			return derived
+		}
+		return ns
+	}
 	if ns != "" {
 		return ns
 	}

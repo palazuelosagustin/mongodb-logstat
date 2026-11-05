@@ -44,7 +44,7 @@ func TestDetectLogFormat(t *testing.T) {
 		want logFormat
 	}{
 		{"json", `{"t":{"$date":"2026-07-17T10:00:00Z"},"msg":"x"}`, formatJSON},
-		{"json after blank lines", "\n\n  " + `{"t":1}`, formatJSON},
+		{"json after blank lines", "\n\n  " + `{"t":{"$date":"2026-07-17T10:00:00Z"},"msg":"x"}`, formatJSON},
 		{"empty", "", formatJSON},
 		{"legacy 4.2", legacyLog, formatLegacy},
 		{"legacy with Z zone", "2020-01-02T03:04:05.678Z I NETWORK  [listener] connection accepted\n", formatLegacy},
@@ -285,5 +285,89 @@ func TestParseTimeArg(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--from must be <= --to") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCmdNamespaceUsesCommandCollection(t *testing.T) {
+	cases := []struct {
+		ns, op  string
+		command map[string]any
+		want    string
+	}{
+		{"config.$cmd", "update", map[string]any{"update": "chunks", "$db": "config"}, "config.chunks"},
+		{"shop.$cmd", "delete", map[string]any{"delete": "orders", "$db": "shop"}, "shop.orders"},
+		{"admin.$cmd", "internal", map[string]any{"replSetUpdatePosition": 1, "$db": "admin"}, "admin.$cmd"},
+		{"shop.orders", "find", map[string]any{"find": "other", "$db": "shop"}, "shop.orders"},
+		{"productDb.$cmd", "getMore", map[string]any{"getMore": 1, "collection": "$cmd.aggregate", "$db": "productDb"}, "productDb.$cmd"},
+	}
+	for _, tc := range cases {
+		if got := deriveNamespace(tc.ns, tc.op, tc.command); got != tc.want {
+			t.Fatalf("deriveNamespace(%q, %q)=%q want %q", tc.ns, tc.op, got, tc.want)
+		}
+	}
+}
+
+func TestFileLabelsAreShortAndUnique(t *testing.T) {
+	got := fileLabels([]string{"/case/rs01-0/mongod.log", "/case/rs01-1/mongod.log", "/case/mongos-0/mongos.log", "/other/a/rs01-0/mongod.log.1"})
+	want := map[string]string{
+		"/case/rs01-0/mongod.log":      "rs01-0/mongod.log",
+		"/case/rs01-1/mongod.log":      "rs01-1/mongod.log",
+		"/case/mongos-0/mongos.log":    "mongos.log",
+		"/other/a/rs01-0/mongod.log.1": "mongod.log.1",
+	}
+	for path, label := range want {
+		if got[path] != label {
+			t.Fatalf("label(%s)=%q want %q", path, got[path], label)
+		}
+	}
+	same := fileLabels([]string{"x/mongod.log", "x/mongod.log"})
+	if same["x/mongod.log"] != "x/mongod.log" {
+		t.Fatalf("duplicate paths: %v", same)
+	}
+}
+
+func TestSameNamedLogsFromTwoNodesAreToldApart(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "rs01-0", "mongod.log"), []byte(slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil)+"\n"))
+	writeFile(t, filepath.Join(dir, "rs01-1", "mongod.log"), []byte(slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 900, nil)+"\n"))
+	out, _, err := Execute(Config{Report: "queries", Top: -1, Bucket: time.Hour, GroupBy: "optype", SortBy: "total-duration", Inputs: []string{dir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Files:                rs01-0/mongod.log,rs01-1/mongod.log", "rs01-1/mongod.log:1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestContainerLogsWithShellPreambleAndTimestamps(t *testing.T) {
+	dir := t.TempDir()
+	slow := slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil)
+	// PSMDB operator pod log: entrypoint shell trace before mongod's JSON.
+	writeFile(t, filepath.Join(dir, "operator", "mongod.log"), []byte("+ exec numactl --interleave=all mongod --bind_ip_all\n"+slow+"\n"))
+	// kubectl logs --timestamps / docker logs -t: RFC3339Nano prefix per line.
+	writeFile(t, filepath.Join(dir, "kubectl", "mongod.log"), []byte("2026-07-17T10:00:00.123456789Z "+slow+"\n"))
+
+	files, failures, skipped := discoverInputs([]string{dir})
+	if len(files) != 2 || len(failures) != 0 || len(skipped) != 0 {
+		t.Fatalf("files=%v failures=%v skipped=%v", files, failures, skipped)
+	}
+	report := computeTimeline(files, nil, Config{Report: "timeline", Top: -1, Bucket: time.Hour, GroupBy: "optype"})
+	if report.Accepted != 2 || report.Stats.Diagnostics.LinesMalformed != 1 {
+		t.Fatalf("accepted=%d malformed=%d want 2 and 1 (the shell line)", report.Accepted, report.Stats.Diagnostics.LinesMalformed)
+	}
+}
+
+func TestJSONAndYAMLFilesAreNotLogs(t *testing.T) {
+	cases := map[string]string{
+		"pretty json":    "{\n  \"ok\": 1\n}\n",
+		"compact json":   `{"members":[{"name":"a"}],"ok":1}` + "\n",
+		"yaml with json": "apiVersion: v1\nitems:\n  data: |\n    {\n      \"a\": 1\n    }\n",
+	}
+	for name, content := range cases {
+		if got := detectLogFormat([]byte(content)); got != formatUnknown {
+			t.Fatalf("%s: format=%v want unknown", name, got)
+		}
 	}
 }

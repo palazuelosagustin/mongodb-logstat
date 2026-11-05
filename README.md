@@ -22,10 +22,12 @@ Flags may appear before or after input paths. Inputs can be files, directories, 
 
 Input handling:
 
-- Only structured JSON logs (MongoDB 4.4 and later) are analyzed. A legacy plain-text log (MongoDB 4.2 or older) is reported as a failed file with that reason; if no file can be read, the command exits 1 and lists why.
+- Supported: structured JSON logs from MongoDB / Percona Server for MongoDB 5.0 and later, from mongod and mongos (tested with 7.0 and 8.0 logs). A legacy plain-text log (MongoDB 4.2 or older) is reported as a failed file with that reason; if no file can be read, the command exits 1 and lists why.
+- Container logs work as collected: shell lines before mongod's first JSON line (Kubernetes operator pods) count as malformed lines, and a timestamp prefix added by `kubectl logs --timestamps` or `docker logs -t` is ignored.
 - Gzip-compressed logs (for example rotated `mongod.log.1.gz`) are decompressed while reading.
 - Directories are walked recursively. Files that are not MongoDB logs, such as FTDC files in `diagnostic.data/`, are skipped: the header shows `Skipped files: N`, JSON shows `filesSkipped` (`inputFilesSkipped` in `analysis`), and `--verbose` lists them. A file named directly on the command line is never skipped; it fails if it is not a log.
-- Slow operations are the `Slow query` lines (log id `51803`). Other messages that mention "slow", such as `Slow connection establishment`, are not counted.
+- Files with the same name from different nodes are told apart by their parent directories (`rs01-0/mongod.log`, `rs01-1/mongod.log`) in the header and in sample line references.
+- Slow operations are the `Slow query` lines (log id `51803`). Other messages that mention "slow", such as `Slow connection establishment`, are not counted. Slow update and delete commands are logged with namespace `<db>.$cmd` on 5.0+; the collection is taken from the command instead.
 - `--from` and `--to` accept RFC3339 (`2026-11-04T13:30:00Z`, `2026-11-04T10:30:00-03:00`) or a time without a zone, which is read as UTC (`2026-11-04T13:30`, `2026-11-04 13:30:00`, `2026-11-04`).
 
 Important behavior and defaults:
@@ -67,7 +69,7 @@ Rows include `label`, `count`, `avg_ms`, `p95_ms`, `max_ms`, dominant `plan`, an
 
 ### `clients`
 
-Terminal or JSON report that correlates accepted logged slow operations to MongoDB connection, client metadata, and authentication events (matched by log id, so 4.4 and 5.0+ authentication messages both work) by exact log context such as `ctx:"conn188052"`. It never attributes by client IP alone. Slow operations without matching in-range connection metadata are counted as uncorrelated.
+Terminal or JSON report that correlates accepted logged slow operations to MongoDB connection, client metadata, and authentication events (matched by log id, including the 5.0+ `Successfully authenticated` message) by exact log context such as `ctx:"conn188052"`. It never attributes by client IP alone. Slow operations without matching in-range connection metadata are counted as uncorrelated.
 
 ```bash
 ./mongodb-logstat --report clients /path/to/mongod.log

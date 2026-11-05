@@ -568,14 +568,52 @@ func newPassStats(files []string, discoveryFailures []FileFailure) PassStats {
 }
 
 func inputFileNames(files []string, discoveryFailures []FileFailure) []string {
-	names := make([]string, 0, len(files)+len(discoveryFailures))
-	for _, file := range files {
-		names = append(names, filepath.Base(file))
-	}
+	paths := append([]string(nil), files...)
 	for _, failure := range discoveryFailures {
-		names = append(names, filepath.Base(failure.Path))
+		paths = append(paths, failure.Path)
+	}
+	labels := fileLabels(paths)
+	names := make([]string, 0, len(paths))
+	for _, path := range paths {
+		names = append(names, labels[path])
 	}
 	return names
+}
+
+// fileLabels names each path by its shortest trailing path that is unique
+// among paths: the base name when that is unique, otherwise enough parent
+// directories to tell the files apart (rs01-0/mongod.log, rs01-1/mongod.log).
+func fileLabels(paths []string) map[string]string {
+	labels := make(map[string]string, len(paths))
+	parts := make(map[string][]string, len(paths))
+	for _, path := range paths {
+		parts[path] = strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	}
+	suffix := func(path string, n int) string {
+		p := parts[path]
+		if n > len(p) {
+			n = len(p)
+		}
+		return strings.Join(p[len(p)-n:], "/")
+	}
+	pending := append([]string(nil), paths...)
+	for depth := 1; len(pending) > 0; depth++ {
+		counts := map[string]int{}
+		for _, path := range pending {
+			counts[suffix(path, depth)]++
+		}
+		var next []string
+		for _, path := range pending {
+			label := suffix(path, depth)
+			if counts[label] == 1 || depth >= len(parts[path]) {
+				labels[path] = label
+				continue
+			}
+			next = append(next, path)
+		}
+		pending = next
+	}
+	return labels
 }
 
 func finalizeStats(stats *PassStats) {
@@ -739,7 +777,7 @@ func omittedShapeTotals(aggs map[string]*shapeAgg, selected map[string]struct{})
 }
 
 func formatSampleLine(path string, line int64) string {
-	return fmt.Sprintf("%s:%d", filepath.Base(path), line)
+	return fmt.Sprintf("%s:%d", path, line)
 }
 
 func nullableString(value string) *string {
@@ -1758,7 +1796,7 @@ func worstSample(op *SlowOperation) AnalysisWorstSample {
 		return AnalysisWorstSample{}
 	}
 	ts := formatJSONTime(op.Timestamp)
-	return AnalysisWorstSample{Timestamp: &ts, DurationMs: op.DurationMillis, SourceFile: filepath.Base(op.SourceFile), SourceLine: op.SourceLine, PlanSummary: op.PlanSummary}
+	return AnalysisWorstSample{Timestamp: &ts, DurationMs: op.DurationMillis, SourceFile: op.SourceFile, SourceLine: op.SourceLine, PlanSummary: op.PlanSummary}
 }
 
 func planVariants(values map[string]int) []AnalysisPlanVariant {
