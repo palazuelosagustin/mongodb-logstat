@@ -29,7 +29,7 @@ func TestREADMEUsageMatchesCLI(t *testing.T) {
 
 func TestREADMEDocumentsEveryReport(t *testing.T) {
 	readme := readREADME(t)
-	for _, report := range []string{"timeline", "queries", "clients", "analysis", "events", "messages"} {
+	for _, report := range []string{"timeline", "queries", "clients", "analysis", "events", "messages", "connections"} {
 		if !strings.Contains(readme, "### `"+report+"`") {
 			t.Errorf("README has no section for report %q", report)
 		}
