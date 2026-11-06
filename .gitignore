@@ -1,2 +1,3 @@
 tests/
 /mongodb-logstat
+/dist/

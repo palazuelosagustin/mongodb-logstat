@@ -9,6 +9,7 @@ text report.
 | field | meaning |
 |---|---|
 | `schemaVersion` | `1` |
+| `toolVersion` | mongodb-logstat version that wrote it (`v0.1.0`, or `dev (commit)` for a local build) |
 | `report` | report name |
 | `range` | `from`/`to` requested with `--from/--to` (`null` when not given) |
 | `observedRange` | first/last accepted slow operation |
@@ -129,7 +130,7 @@ $C --top 0 DIR | jq -r '.authFailures[] | select(.user=="app") | [.db,.error,.co
 
 ## analysis (schemaVersion 2)
 
-Top level: `semantics`, `ranges` (`requested`, `inputObserved`,
+Top level: `toolVersion`, `semantics`, `ranges` (`requested`, `inputObserved`,
 `slowOperationsObserved`, `analysisDurationSeconds`), `options`,
 `diagnostics` (`input*` names, `duplicateLinesSkipped`), `nodes[]`,
 `global`, `timeline[]`, `hotWindows[]`, `queryShapes[]`, `namespaces[]`,

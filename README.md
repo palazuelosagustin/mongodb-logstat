@@ -2,11 +2,27 @@
 
 `mongodb-logstat` summarizes MongoDB structured JSON logs. It provides human terminal reports of slow operations for quick review, a client correlation report, a time-ordered list of process and replica-set events, a grouped list of warnings and errors, connection and authentication counts over time, and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
 
-## Requirements
+## Install
 
-- Go `1.22+`
+Download the binary for your platform from the
+[latest release](https://github.com/palazuelosagustin/mongodb-logstat/releases/latest)
+(macOS and Linux, amd64 and arm64):
 
-## Build
+```bash
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+curl -fsSL "https://github.com/palazuelosagustin/mongodb-logstat/releases/latest/download/mongodb-logstat_${OS}_${ARCH}.tar.gz" | tar -xz mongodb-logstat
+./mongodb-logstat --version
+```
+
+Move the binary to a directory on your `PATH`. A file downloaded with a
+browser on macOS is quarantined; clear it with
+`xattr -d com.apple.quarantine mongodb-logstat`. Each release lists `checksums.txt`
+(SHA-256) for the archives.
+
+## Build from source
+
+Requires Go `1.22+`.
 
 ```bash
 go build -o mongodb-logstat .
@@ -15,10 +31,35 @@ go build -o mongodb-logstat .
 The binary is not committed (it is in `.gitignore`); rebuild it after each
 pull.
 
+A source build reports `dev (<commit>)` as its version.
+
+## Versions and releases
+
+Releases follow [semantic versioning](https://semver.org/). Until `v1.0.0`, a
+minor release (`v0.2.0`) adds or changes reports, flags, columns or JSON
+fields, and a patch release (`v0.1.1`) only fixes bugs. `--version` prints the
+version, commit and build date, and every JSON output carries `toolVersion`, so
+a saved result says which build produced it. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
+
+To release: move the `Unreleased` entries in `CHANGELOG.md` under the new
+version, commit, then tag and push the tag:
+
+```bash
+git tag -a v0.2.0 -m v0.2.0
+git push origin v0.2.0
+```
+
+The `release` GitHub Actions workflow runs the tests and publishes the
+archives with [GoReleaser](https://goreleaser.com/) (`.goreleaser.yaml`). Check
+the config locally with `goreleaser release --snapshot --clean`; it writes to
+`dist/` and publishes nothing.
+
 ## Usage
 
 ```text
 mongodb-logstat --report timeline|queries|clients|analysis|events|messages|connections [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+       mongodb-logstat --version
 ```
 
 Flags may appear before or after input paths. Inputs can be files, directories, or a mix of both.
