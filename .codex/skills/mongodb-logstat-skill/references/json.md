@@ -106,6 +106,27 @@ jq -r --arg n 'db1:27017' '.rows[] | select((.counts[$n] // 0) > 0.5 * .total) |
 `countsByOperation`, `topNamespaces[]`, `sampleLines[]`; `omitted` for groups
 beyond `--top` and the uncorrelated operations.
 
+## connections
+
+`bucket`, `totals` (same fields as a row, without `start`/`node`), `rows[]`
+(`start`, `node`, `accepted`, `ended`, `openMax`, `openLast`,
+`authSucceeded`, `authFailed`, `refused`; `openMax`/`openLast` are `null`
+when the bucket had no accept/end line), `clients[]` (`clientIP`,
+`accepted`, `ended`, `authFailed`, `refused`, `applications`, `drivers`,
+`nodes`), `omittedClients`, `authFailures[]` (`user`, `db`, `mechanism`,
+`error`, `count`, `first`, `last`, `clientIPs`, `nodes`),
+`omittedAuthFailures`.
+
+```bash
+C="mongodb-logstat --report connections --json --bucket 5m"
+# buckets with the most new connections, per node
+$C DIR | jq -r '.rows | sort_by(-.accepted)[:10][] | [.start,.node,.accepted,.openMax] | @tsv'
+# peak open connections per node
+$C DIR | jq -r '.rows | group_by(.node)[] | [.[0].node, (map(.openMax // 0) | max)] | @tsv'
+# failures for one user, with the IPs
+$C --top 0 DIR | jq -r '.authFailures[] | select(.user=="app") | [.db,.error,.count,(.clientIPs|length)] | @tsv'
+```
+
 ## analysis (schemaVersion 2)
 
 Top level: `semantics`, `ranges` (`requested`, `inputObserved`,

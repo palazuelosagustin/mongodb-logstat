@@ -1,6 +1,6 @@
 # mongodb-logstat
 
-`mongodb-logstat` summarizes MongoDB structured JSON logs. It provides human terminal reports of slow operations for quick review, a client correlation report, a time-ordered list of process and replica-set events, a grouped list of warnings and errors, and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
+`mongodb-logstat` summarizes MongoDB structured JSON logs. It provides human terminal reports of slow operations for quick review, a client correlation report, a time-ordered list of process and replica-set events, a grouped list of warnings and errors, connection and authentication counts over time, and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
 
 ## Requirements
 
@@ -15,7 +15,7 @@ go build -o mongodb-logstat .
 ## Usage
 
 ```text
-mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat --report timeline|queries|clients|analysis|events|messages|connections [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 Flags may appear before or after input paths. Inputs can be files, directories, or a mix of both.
@@ -35,10 +35,10 @@ Input handling:
 
 Important behavior and defaults:
 
-- `--report` is required and must be one of `timeline`, `queries`, `clients`, `analysis`, `events`, or `messages`.
+- `--report` is required and must be one of `timeline`, `queries`, `clients`, `analysis`, `events`, `messages`, or `connections`.
 - `--bucket 1h`.
 - `--group-by optype`.
-- `--top` defaults to `20` for `queries`, query-grouped timelines, and `analysis`; `clients` defaults to all correlated user/client groups unless `--top` is set; use `--top 0` for all shapes/groups.
+- `--top` defaults to `20` for `queries`, query-grouped timelines, `analysis`, and the client and failure lists of `connections`; `clients` defaults to all correlated user/client groups unless `--top` is set; use `--top 0` for all shapes/groups.
 - `--sort-by total-duration` for query ranking and `count` for client ranking. `clients` also supports `total-duration`, `p95`, `max`, and `docs-examined`.
 - `--fill-gaps=true` for `analysis` timeline buckets.
 - `--max-buckets 10000`.
@@ -147,6 +147,23 @@ Warning, error and fatal lines (`"s"` of `W`, `E`, `F`) grouped by severity, com
 ```
 
 JSON (`schemaVersion` 1) has `lines`, `bySeverity`, `groups`, `omittedGroups`, `omittedLines`, and `messages[]` with `severity`, `component`, `logId`, `msg`, `count`, `first`, `last`, `nodes` and `files` (count per node and per file), and `sample` (file, line, and attributes of the first occurrence). In the sample, values under query-like keys (`cmd`, `command`, `filter`, `q`, `u`, `pipeline`, `keyValue`, `doc`, and similar) are replaced by type markers, and strings longer than 300 bytes are cut. Error codes, error messages and host names are kept.
+
+### `connections`
+
+Connection and authentication activity per time bucket (`--bucket`, default `1h`) and node, then the client IPs that opened connections and the authentication failures. Facts only.
+
+```bash
+./mongodb-logstat --report connections /path/to/logs
+./mongodb-logstat --report connections --bucket 5m --from 2026-11-04T13:00 --to 2026-11-04T14:00 --top 50 /path/to/logs
+```
+
+- Rows (one per bucket and node, buckets without connection lines are skipped): `accepted` (22943), `ended` (22944), `open_max` and `open_last` (the `connectionCount` logged on those lines: open connections at that moment; `-` when the bucket had no accept/end line), `auth_ok` (20250 on 6.0, 5286306 on 7.0+), `auth_fail` (20249 on 6.0, 5286307 on 7.0+), `refused` (22942, too many open connections).
+- Clients (top `--top`, default 20, by connections accepted): client IP, accepted, ended, failed authentications, refused, nodes, and the applications and drivers from `client metadata` lines from that IP.
+- Authentication failures (top `--top`): grouped by user, authentication database, mechanism and error code name, with count, first and last time, client IPs and nodes. Only the error code name (`MechanismUnavailable`, `AuthenticationFailed`) is kept; the error text is dropped.
+
+`ended` can exceed `accepted` and `open_last` can be lower than at the start: connections opened before the log starts end inside it. The 6.0 failure id 20249 and refused connections (22942) did not occur in the test logs; they are covered by unit tests.
+
+JSON (`schemaVersion` 1) has `bucket`, `totals`, `rows[]` (`start`, `node`, `accepted`, `ended`, `openMax`, `openLast`, `authSucceeded`, `authFailed`, `refused`), `clients[]` (`clientIP`, `accepted`, `ended`, `authFailed`, `refused`, `applications`, `drivers`, `nodes`), `omittedClients`, `authFailures[]` (`user`, `db`, `mechanism`, `error`, `count`, `first`, `last`, `clientIPs`, `nodes`), and `omittedAuthFailures`.
 
 ## Nodes
 

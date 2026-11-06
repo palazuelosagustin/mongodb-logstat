@@ -191,6 +191,14 @@ func Execute(cfg Config) (string, int, error) {
 		report.Stats.Skipped = skipped
 		report.Stats.Diagnostics.FilesSkipped = len(skipped)
 		return renderEvents(cfg, report)
+	case "connections":
+		report := computeConnections(files, discoveryFailures, cfg)
+		if report.Stats.Diagnostics.FilesRead == 0 {
+			return "", 1, noReadableInputError(files, discoveryFailures, skipped)
+		}
+		report.Stats.Skipped = skipped
+		report.Stats.Diagnostics.FilesSkipped = len(skipped)
+		return renderConnections(cfg, report)
 	case "messages":
 		report := computeMessages(files, discoveryFailures, cfg)
 		if report.Stats.Diagnostics.FilesRead == 0 {
@@ -1131,7 +1139,7 @@ func effectiveTop(cfg Config, context string) int {
 	if cfg.Top >= 0 {
 		return cfg.Top
 	}
-	if context == "queries" || context == "analysis" || (context == "timeline" && cfg.GroupBy == "query") {
+	if context == "queries" || context == "analysis" || context == "connections" || (context == "timeline" && cfg.GroupBy == "query") {
 		return 20
 	}
 	return 0
