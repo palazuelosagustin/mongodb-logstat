@@ -96,7 +96,11 @@ with `--from/--to` once you know the window.
    `analysis` is JSON for reading with `jq`; do not read it whole.
 5. **`clients`** when the question is who sent the load.
 
-Text is the cheapest to read for 1-3. Use `--json` with `jq` for questions
+Measured sizes on a 7-node, 3-day sharded cluster (25 rotated files,
+850 k slow operations): text `events` 5 KB, `messages` 5 KB, `queries` 7 KB,
+`clients` 8 KB, `timeline` (1 h buckets) 11 KB; their JSON is 2-10x larger
+(`clients` 85 KB); `analysis` 210 KB. So read 1-3 as text, and `analysis`
+only through `jq`. Use `--json` with `jq` for questions
 like "how many times", "which node first", or "between which events":
 
 ```bash
