@@ -12,6 +12,9 @@
 go build -o mongodb-logstat .
 ```
 
+The binary is not committed (it is in `.gitignore`); rebuild it after each
+pull.
+
 ## Usage
 
 ```text
