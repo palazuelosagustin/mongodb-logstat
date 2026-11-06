@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"sort"
 	"strconv"
@@ -28,8 +30,16 @@ type StructuredEvent struct {
 
 func parseFiles(paths []string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) {
 	labels := fileLabels(paths)
+	// A second copy of a log (mongod.log next to mongod.log.gz, or an earlier
+	// snapshot of the same growing file) only contributes the lines past what
+	// was already read from the first copy.
+	copies := map[string]*copyGroup{}
 	for _, path := range paths {
-		if err := parseFile(path, labels[path], opts, visitor, stats); err != nil {
+		err := parseOneFile(path, labels[path], copies, true, opts, visitor, stats)
+		if err == errNotACopy {
+			err = parseOneFile(path, labels[path], copies, false, opts, visitor, stats)
+		}
+		if err != nil {
 			stats.Failures = append(stats.Failures, FileFailure{Path: path, Reason: err.Error()})
 			stats.Diagnostics.FilesFailed++
 			continue
@@ -38,33 +48,95 @@ func parseFiles(paths []string, opts parseOptions, visitor func(*SlowOperation),
 	}
 }
 
-// parseFile reads one log. label is the short, unique name used for the file
-// in sample references (see fileLabels).
-func parseFile(path, label string, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) error {
-	src, format, closeFn, err := openLog(path)
+// copyGroup tracks files that start with the same line.
+type copyGroup struct {
+	label    string   // first file read
+	lines    int64    // most lines read from any file in the group
+	prevHash uint64   // hash of that file's line lines-1
+	lastHash uint64   // hash of that file's last line
+	head     []uint64 // hashes of the first file's first copyCheckLines lines
+}
+
+// copyCheckLines is how many leading lines must match before a file is
+// treated as a copy of an earlier one.
+const copyCheckLines = 64
+
+var errNotACopy = errors.New("not a copy")
+
+func lineHash(line []byte) uint64 {
+	h := fnv.New64a()
+	h.Write(line)
+	return h.Sum64()
+}
+
+func parseOneFile(path, label string, copies map[string]*copyGroup, dedupe bool, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) error {
+	src, err := openLog(path)
 	if err != nil {
 		return err
 	}
-	defer closeFn()
-	switch format {
+	defer src.Close()
+	return parseLog(src, label, copies, dedupe, opts, visitor, stats)
+}
+
+// parseLog reads one open log. label is the short, unique name used for the
+// file in sample references (see fileLabels).
+func parseLog(src *logSource, label string, copies map[string]*copyGroup, dedupe bool, opts parseOptions, visitor func(*SlowOperation), stats *PassStats) error {
+	switch src.Format {
 	case formatLegacy:
 		return errLegacyTextLog
 	case formatUnknown:
 		return errNotMongoLog
 	}
-
-	reader := bufio.NewReader(src)
+	var group *copyGroup
+	var skipLines int64
+	if fp := src.Fingerprint; fp != "" {
+		group = copies[fp]
+		if group == nil {
+			group = &copyGroup{label: label}
+			copies[fp] = group
+		} else if dedupe {
+			skipLines = group.lines
+		}
+	}
+	reader := bufio.NewReader(src.Reader)
 	var lineNumber int64
+	var skipped int64
+	var prevLine, lastLine []byte
 	for {
 		line, oversized, err := readLogicalLine(reader, maxLogicalLineBytes)
 		if err == io.EOF {
-			return nil
+			break
 		}
 		if err != nil {
 			return err
 		}
 
 		lineNumber++
+		prevLine, lastLine = lastLine, line
+		if group != nil && lineNumber <= copyCheckLines {
+			h := lineHash(line)
+			switch {
+			case lineNumber < skipLines && lineNumber <= int64(len(group.head)) && h != group.head[lineNumber-1]:
+				// Same first log line, different content: two different logs.
+				return errNotACopy
+			case skipLines == 0 && group.lines == 0:
+				group.head = append(group.head, h)
+			}
+		}
+		if lineNumber < skipLines {
+			if lineNumber == skipLines-1 && lineHash(line) != group.prevHash {
+				// Same first line, different content: two different logs.
+				return errNotACopy
+			}
+			skipped++
+			continue
+		}
+		if lineNumber == skipLines && lineHash(line) == group.lastHash {
+			// The first copy may end with a partly written line; only an
+			// identical line is a duplicate.
+			skipped++
+			continue
+		}
 		stats.Diagnostics.LinesRead++
 		if oversized {
 			stats.Diagnostics.LinesMalformed++
@@ -119,6 +191,16 @@ func parseFile(path, label string, opts parseOptions, visitor func(*SlowOperatio
 		}
 		visitor(op)
 	}
+	if skipped > 0 {
+		stats.Diagnostics.DuplicateLinesSkipped += skipped
+		stats.Duplicates = append(stats.Duplicates, FileDuplicate{Path: label, Of: group.label})
+	}
+	if group != nil && lineNumber > group.lines {
+		group.lines = lineNumber
+		group.prevHash = lineHash(prevLine)
+		group.lastHash = lineHash(lastLine)
+	}
+	return nil
 }
 
 func readLogicalLine(r *bufio.Reader, maxBytes int) ([]byte, bool, error) {
@@ -223,7 +305,10 @@ func parseSlowOperationDoc(raw map[string]any, path string, lineNumber int64, st
 		command = commandDocumentFromType(attr)
 	}
 	originatingCommand, _ := attr["originatingCommand"].(map[string]any)
-	commandName := deriveCommandName(command)
+	commandName := statementCommandName(asString(attr["type"]))
+	if commandName == "" {
+		commandName = deriveCommandName(command)
+	}
 	if commandName == "" {
 		commandName = strings.TrimSpace(asString(attr["op"]))
 	}
@@ -404,6 +489,27 @@ func parseDuration(attr map[string]any) (time.Duration, bool) {
 	return 0, false
 }
 
+// statementCommandName maps the attr.type of a single-statement slow log line
+// to its command. Such lines (6.0+ "type":"update"/"remove" with "command":
+// {"q":...,"u":...}) carry the statement, not a command document, so the
+// command cannot be read from the document's first key.
+func statementCommandName(typeName string) string {
+	switch strings.TrimSpace(typeName) {
+	case "update":
+		return "update"
+	case "remove":
+		return "delete"
+	case "insert":
+		return "insert"
+	case "query":
+		return "find"
+	case "getmore":
+		return "getMore"
+	default:
+		return ""
+	}
+}
+
 func deriveCommandName(command map[string]any) string {
 	if command == nil {
 		return ""
@@ -411,7 +517,10 @@ func deriveCommandName(command map[string]any) string {
 	for _, key := range []string{
 		"find", "count", "distinct", "delete", "findAndModify", "update", "insert",
 		"aggregate", "bulkWrite", "getMore", "commitTransaction", "abortTransaction",
-		"dbStats", "collStats", "listCollections", "listIndexes", "dropDatabase", "create", "drop",
+		"dbStats", "collStats", "listCollections", "listIndexes", "listDatabases", "dropDatabase", "create", "drop",
+		"createIndexes", "dropIndexes", "collMod", "renameCollection", "validate", "compact", "explain",
+		"killCursors", "killOp", "endSessions", "ping", "top", "serverStatus", "currentOp", "buildInfo",
+		"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus",
 		"saslStart", "saslContinue", "authenticate", "hello", "isMaster", "replSetHeartbeat", "configTerm",
 	} {
 		if _, ok := command[key]; ok {
@@ -456,7 +565,10 @@ func normalizeOperation(commandName string, command, originatingCommand map[stri
 		return OperationInfo{Category: "transaction", Operation: name}
 	case "configTerm", "replSetHeartbeat", "hello", "isMaster":
 		return OperationInfo{Category: "internal", Operation: "internal", Internal: true}
-	case "dbStats", "collStats", "listCollections", "listIndexes", "dropDatabase", "create", "drop":
+	case "dbStats", "collStats", "listCollections", "listIndexes", "listDatabases", "dropDatabase", "create", "drop",
+		"createIndexes", "dropIndexes", "collMod", "renameCollection", "validate", "compact", "explain",
+		"killCursors", "killOp", "endSessions", "ping", "top", "serverStatus", "currentOp", "buildInfo",
+		"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus":
 		return OperationInfo{Category: "command", Operation: "command"}
 	case "command":
 		if command != nil {

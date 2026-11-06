@@ -47,7 +47,7 @@ func discoverInputs(inputs []string) ([]string, []FileFailure, []string) {
 				failures = append(failures, FileFailure{Path: path, Reason: err.Error()})
 				return nil
 			}
-			if format == formatUnknown {
+			if format == formatUnknown || format == formatEmpty {
 				skipped = append(skipped, path)
 				return nil
 			}

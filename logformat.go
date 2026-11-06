@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -17,6 +19,7 @@ const (
 	formatJSON    logFormat = iota // MongoDB 4.4+ structured log (or an empty file)
 	formatLegacy                   // MongoDB 4.2 or older plain-text log
 	formatUnknown                  // anything else: FTDC, archives, notes, ...
+	formatEmpty                    // empty or whitespace only
 )
 
 const sniffBytes = 64 * 1024
@@ -30,12 +33,24 @@ var (
 	errNotMongoLog   = errors.New("not a MongoDB log file (expected structured JSON log lines, optionally gzip-compressed)")
 )
 
+// logSource is an open log file, decompressed when it was gzip.
+type logSource struct {
+	Reader io.Reader
+	Format logFormat
+	// Fingerprint is a hash of the first MongoDB log line (the first
+	// non-empty line when there is none). Files with the same fingerprint
+	// are usually copies or snapshots of one log; parseFiles confirms that
+	// before skipping lines. Empty for empty files.
+	Fingerprint string
+	Close       func() error
+}
+
 // openLog opens path and returns a reader of its log text, decompressing
 // gzip transparently, plus the format detected from the first bytes.
-func openLog(path string) (io.Reader, logFormat, func() error, error) {
+func openLog(path string) (*logSource, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, formatUnknown, nil, err
+		return nil, err
 	}
 	closeFn := f.Close
 	raw := bufio.NewReaderSize(f, sniffBytes)
@@ -44,7 +59,7 @@ func openLog(path string) (io.Reader, logFormat, func() error, error) {
 		gz, err := gzip.NewReader(raw)
 		if err != nil {
 			f.Close()
-			return nil, formatUnknown, nil, err
+			return nil, err
 		}
 		closeFn = func() error {
 			gz.Close()
@@ -55,9 +70,40 @@ func openLog(path string) (io.Reader, logFormat, func() error, error) {
 	head, err := reader.Peek(sniffBytes)
 	if err != nil && err != io.EOF && err != bufio.ErrBufferFull {
 		closeFn()
-		return nil, formatUnknown, nil, err
+		return nil, err
 	}
-	return reader, detectLogFormat(head), closeFn, nil
+	src := &logSource{Reader: reader, Format: detectLogFormat(head), Close: closeFn}
+	if first := firstLogLine(head); len(first) > 0 {
+		sum := sha256.Sum256(first)
+		src.Fingerprint = hex.EncodeToString(sum[:])
+	}
+	return src, nil
+}
+
+// firstLogLine returns the first structured MongoDB log line in head, or the
+// first non-empty line when there is none. Container logs start with shell
+// output that is identical across pods, so it cannot identify a log.
+func firstLogLine(head []byte) []byte {
+	var firstNonEmpty []byte
+	for len(head) > 0 {
+		line := head
+		if i := bytes.IndexByte(head, '\n'); i >= 0 {
+			line, head = head[:i], head[i+1:]
+		} else {
+			head = nil
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		if isStructuredLogLine(line) {
+			return line
+		}
+		if firstNonEmpty == nil {
+			firstNonEmpty = line
+		}
+	}
+	return firstNonEmpty
 }
 
 // detectLogFormat classifies a file from the lines in its first block. A
@@ -87,7 +133,7 @@ func detectLogFormat(head []byte) logFormat {
 	}
 	switch {
 	case !sawLine:
-		return formatJSON
+		return formatEmpty
 	case sawLegacy:
 		return formatLegacy
 	default:
@@ -130,10 +176,10 @@ func isStructuredLogLine(line []byte) bool {
 // sniffLogFile reports the format of the file at path without reading past
 // the first block.
 func sniffLogFile(path string) (logFormat, error) {
-	_, format, closeFn, err := openLog(path)
+	src, err := openLog(path)
 	if err != nil {
 		return formatUnknown, err
 	}
-	closeFn()
-	return format, nil
+	src.Close()
+	return src.Format, nil
 }

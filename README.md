@@ -1,6 +1,6 @@
 # mongodb-logstat
 
-`mongodb-logstat` summarizes MongoDB structured JSON slow-operation logs. It provides human terminal reports for quick review, a client correlation report, and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
+`mongodb-logstat` summarizes MongoDB structured JSON logs. It provides human terminal reports of slow operations for quick review, a client correlation report, a time-ordered list of process and replica-set events, a grouped list of warnings and errors, and a bounded, redacted JSON `analysis` report intended as input for AI-assisted investigation.
 
 ## Requirements
 
@@ -26,13 +26,15 @@ Input handling:
 - Container logs work as collected: shell lines before mongod's first JSON line (Kubernetes operator pods) count as malformed lines, and a timestamp prefix added by `kubectl logs --timestamps` or `docker logs -t` is ignored.
 - Gzip-compressed logs (for example rotated `mongod.log.1.gz`) are decompressed while reading.
 - Directories are walked recursively. Files that are not MongoDB logs, such as FTDC files in `diagnostic.data/`, are skipped: the header shows `Skipped files: N`, JSON shows `filesSkipped` (`inputFilesSkipped` in `analysis`), and `--verbose` lists them. A file named directly on the command line is never skipped; it fails if it is not a log.
+- Copies of one log are counted once. When a file starts with the same lines as one already read (for example `mongod.log` next to `mongod.log.gz`, or an earlier and a later snapshot of the same file), only the lines past what was already read are used. The header shows `Duplicate lines: N skipped (copy repeats original)` and JSON shows `duplicateLinesSkipped`.
+- Empty files (common in collection-tool output) are skipped like other non-log files.
 - Files with the same name from different nodes are told apart by their parent directories (`rs01-0/mongod.log`, `rs01-1/mongod.log`) in the header and in sample line references.
-- Slow operations are the `Slow query` lines (log id `51803`). Other messages that mention "slow", such as `Slow connection establishment`, are not counted. Slow update and delete commands are logged with namespace `<db>.$cmd` on 5.0+; the collection is taken from the command instead.
+- Slow operations are the `Slow query` lines (log id `51803`). Single-statement writes logged with `"type":"update"`/`"remove"` (6.0) are counted as `update`/`delete`; admin, index and DDL commands such as `createIndexes`, `listDatabases` or `collMod` are counted as `command`. Other messages that mention "slow", such as `Slow connection establishment`, are not counted. Slow update and delete commands are logged with namespace `<db>.$cmd` on 5.0+; the collection is taken from the command instead.
 - `--from` and `--to` accept RFC3339 (`2026-11-04T13:30:00Z`, `2026-11-04T10:30:00-03:00`) or a time without a zone, which is read as UTC (`2026-11-04T13:30`, `2026-11-04 13:30:00`, `2026-11-04`).
 
 Important behavior and defaults:
 
-- `--report` is required and must be one of `timeline`, `queries`, `clients`, or `analysis`.
+- `--report` is required and must be one of `timeline`, `queries`, `clients`, `analysis`, `events`, or `messages`.
 - `--bucket 1h`.
 - `--group-by optype`.
 - `--top` defaults to `20` for `queries`, query-grouped timelines, and `analysis`; `clients` defaults to all correlated user/client groups unless `--top` is set; use `--top 0` for all shapes/groups.
@@ -103,6 +105,45 @@ The report includes:
 - hot windows ranked by cumulative slow-operation duration;
 - ranked query shapes with globally unique `shapeKey` values, redacted structure, observed operations, cursor counts, latency, cumulative impact, optional metric aggregates, `planEvidence`, indicators, and worst sample reference;
 - top namespaces, compact internal-operation summaries, and omitted-data accounting.
+
+### `events`
+
+Time-ordered list of process, replica-set and configuration events, one row per event with time (millisecond precision, UTC), file, kind, and the facts the log states. It reports facts only: no thresholds, levels, or verdicts. Logs from several nodes are merged in time order, so a cluster dump reads as one timeline.
+
+```bash
+./mongodb-logstat --report events /path/to/cluster-dump
+./mongodb-logstat --report events --json --from 2026-11-04T13:00 --to 2026-11-04T14:00 /path/to/logs
+```
+
+| kind | log id | detail |
+|---|---|---|
+| `start` | 4615611 | host, port, pid, dbPath (mongod) |
+| `version` | 23403 | server version (mongod and mongos) |
+| `signal` | 23377 | signal number and name |
+| `shutdown` | 23138 | exit code |
+| `uncleanShutdown` | 22271 | detected at startup |
+| `fatal` | any `"s":"F"` line | message, error/code when present |
+| `rsState` | 21358 | this node's old -> new replica-set state |
+| `memberState` | 21215, 21216 | another member's new state as seen by this node (`DOWN` for 21216) |
+| `electionStart` | 4615652 | no primary seen within the election timeout |
+| `electionWon` / `electionLost` | 21450 / 21434 | term / dry run |
+| `syncSource` | 21088 | old -> new sync source |
+| `rsConfig` | 21392 | set name, config version, term, member count |
+| `initialSyncStart` / `initialSyncDone` | 21164 / 21163 | attempt / duration |
+| `fcv` | 20459 | featureCompatibilityVersion being set |
+
+JSON (`schemaVersion` 1) has `kinds` (count per kind) and `events[]` with `time`, `file`, `line`, `kind`, `logId`, `detail`, and `facts` (the attribute values behind the detail). `--top` does not apply.
+
+### `messages`
+
+Warning, error and fatal lines (`"s"` of `W`, `E`, `F`) grouped by severity, component, log id and message, with count, first and last time, and the files that logged them. Sorted by severity (fatal first), then count. `--top N` limits the groups shown; the header and JSON account for the omitted groups and lines.
+
+```bash
+./mongodb-logstat --report messages /path/to/logs
+./mongodb-logstat --report messages --json --top 50 /path/to/logs
+```
+
+JSON (`schemaVersion` 1) has `lines`, `bySeverity`, `groups`, `omittedGroups`, `omittedLines`, and `messages[]` with `severity`, `component`, `logId`, `msg`, `count`, `first`, `last`, `files` (count per file), and `sample` (file, line, and attributes of the first occurrence). In the sample, values under query-like keys (`cmd`, `command`, `filter`, `q`, `u`, `pipeline`, `keyValue`, `doc`, and similar) are replaced by type markers, and strings longer than 300 bytes are cut. Error codes, error messages and host names are kept.
 
 ## Query Identity
 

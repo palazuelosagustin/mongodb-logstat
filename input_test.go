@@ -45,7 +45,7 @@ func TestDetectLogFormat(t *testing.T) {
 	}{
 		{"json", `{"t":{"$date":"2026-07-17T10:00:00Z"},"msg":"x"}`, formatJSON},
 		{"json after blank lines", "\n\n  " + `{"t":{"$date":"2026-07-17T10:00:00Z"},"msg":"x"}`, formatJSON},
-		{"empty", "", formatJSON},
+		{"empty", "", formatEmpty},
 		{"legacy 4.2", legacyLog, formatLegacy},
 		{"legacy with Z zone", "2020-01-02T03:04:05.678Z I NETWORK  [listener] connection accepted\n", formatLegacy},
 		{"binary", "\x00\x01\x02\x03ftdc", formatUnknown},
@@ -369,5 +369,107 @@ func TestJSONAndYAMLFilesAreNotLogs(t *testing.T) {
 		if got := detectLogFormat([]byte(content)); got != formatUnknown {
 			t.Fatalf("%s: format=%v want unknown", name, got)
 		}
+	}
+}
+
+func TestDuplicateCopiesAreCountedOnce(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil),
+		slowLine("2026-07-17T10:01:00Z", "find", "shop", "orders", 200, nil),
+	}
+	full := strings.Join(lines, "\n") + "\n"
+	more := full + slowLine("2026-07-17T10:02:00Z", "insert", "shop", "orders", 300, nil) + "\n"
+	// Same log rotated and compressed next to the original, plus a later,
+	// longer snapshot of the same growing file.
+	writeFile(t, filepath.Join(dir, "mongod.log-20260717"), []byte(full))
+	writeFile(t, filepath.Join(dir, "mongod.log-20260717.gz"), gzipBytes(t, []byte(full)))
+	writeFile(t, filepath.Join(dir, "snap2", "mongod.log"), []byte(more))
+	// Empty helper files from collection tools are skipped, not read.
+	writeFile(t, filepath.Join(dir, "dmsetup-info"), nil)
+
+	out, _, err := Execute(Config{Report: "timeline", Top: -1, Bucket: time.Hour, GroupBy: "optype", Inputs: []string{dir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Logged slow ops:      3\n",
+		"Duplicate lines:      4 skipped (mongod.log-20260717.gz repeats mongod.log-20260717; mongod.log repeats mongod.log-20260717)",
+		"Input files:          3\n",
+		"Skipped files:        1 not MongoDB logs",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestStatementLevelWritesAndAdminCommands(t *testing.T) {
+	line := func(attr map[string]any) string {
+		doc := map[string]any{"t": map[string]any{"$date": "2026-07-17T10:00:00Z"}, "id": 51803, "msg": "Slow query", "ctx": "conn1", "attr": attr}
+		data, _ := json.Marshal(doc)
+		return string(data)
+	}
+	cases := []struct {
+		name      string
+		attr      map[string]any
+		operation string
+		namespace string
+	}{
+		{"6.0 remove statement", map[string]any{"type": "remove", "ns": "shop.orders", "command": map[string]any{"q": map[string]any{"_id": 1}, "limit": 1}, "durationMillis": 150}, "delete", "shop.orders"},
+		{"6.0 update statement", map[string]any{"type": "update", "ns": "shop.orders", "command": map[string]any{"q": map[string]any{"_id": 1}, "u": map[string]any{"$set": map[string]any{"a": 1}}, "multi": false, "upsert": false}, "durationMillis": 150}, "update", "shop.orders"},
+		{"index build", map[string]any{"type": "none", "ns": "shop.orders", "command": map[string]any{"createIndexes": "orders", "indexes": []any{}, "$db": "shop"}, "durationMillis": 150}, "command", "shop.orders"},
+		{"listDatabases", map[string]any{"type": "command", "ns": "admin.$cmd", "command": map[string]any{"listDatabases": 1, "authorizedDatabases": true, "$db": "admin"}, "durationMillis": 150}, "command", "admin.$cmd"},
+	}
+	for _, tc := range cases {
+		op, status := parseLineForTest(t, line(tc.attr))
+		if status != lineAccepted {
+			t.Fatalf("%s: status=%v", tc.name, status)
+		}
+		if op.Operation != tc.operation || op.Namespace != tc.namespace {
+			t.Fatalf("%s: got %s %s want %s %s", tc.name, op.Operation, op.Namespace, tc.operation, tc.namespace)
+		}
+	}
+}
+
+func TestDifferentLogsSharingFirstLineAreBothRead(t *testing.T) {
+	dir := t.TempDir()
+	first := `{"t":{"$date":"2026-07-17T00:00:00.000+00:00"},"s":"I","c":"CONTROL","id":23377,"ctx":"SignalHandler","msg":"Received signal","attr":{"signal":10}}`
+	a := first + "\n" + slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil) + "\n" + slowLine("2026-07-17T10:00:01Z", "find", "shop", "orders", 100, nil) + "\n"
+	b := first + "\n" + slowLine("2026-07-17T11:00:00Z", "insert", "shop", "orders", 100, nil) + "\n" + slowLine("2026-07-17T11:00:01Z", "insert", "shop", "orders", 100, nil) + "\n" + slowLine("2026-07-17T11:00:02Z", "insert", "shop", "orders", 100, nil) + "\n"
+	writeFile(t, filepath.Join(dir, "node1", "mongod.log"), []byte(a))
+	writeFile(t, filepath.Join(dir, "node2", "mongod.log"), []byte(b))
+	report := computeTimeline([]string{filepath.Join(dir, "node1", "mongod.log"), filepath.Join(dir, "node2", "mongod.log")}, nil, Config{Report: "timeline", Top: -1, Bucket: time.Hour, GroupBy: "optype"})
+	if report.Accepted != 5 || report.Stats.Diagnostics.DuplicateLinesSkipped != 0 || len(report.Stats.Duplicates) != 0 {
+		t.Fatalf("accepted=%d duplicates=%d %v", report.Accepted, report.Stats.Diagnostics.DuplicateLinesSkipped, report.Stats.Duplicates)
+	}
+}
+
+func TestSnapshotWithPartialLastLine(t *testing.T) {
+	dir := t.TempDir()
+	l1 := slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil)
+	l2 := slowLine("2026-07-17T10:01:00Z", "find", "shop", "orders", 100, nil)
+	l3 := slowLine("2026-07-17T10:02:00Z", "insert", "shop", "orders", 100, nil)
+	writeFile(t, filepath.Join(dir, "a", "mongod.log"), []byte(l1+"\n"+l2+"\n"+l3[:20]))
+	writeFile(t, filepath.Join(dir, "b", "mongod.log"), []byte(l1+"\n"+l2+"\n"+l3+"\n"))
+	report := computeTimeline([]string{filepath.Join(dir, "a", "mongod.log"), filepath.Join(dir, "b", "mongod.log")}, nil, Config{Report: "timeline", Top: -1, Bucket: time.Hour, GroupBy: "optype"})
+	if report.Accepted != 3 || report.Stats.Diagnostics.DuplicateLinesSkipped != 2 {
+		t.Fatalf("accepted=%d duplicates=%d want 3 and 2", report.Accepted, report.Stats.Diagnostics.DuplicateLinesSkipped)
+	}
+}
+
+func TestPodLogsWithSameShellPreambleAreNotCopies(t *testing.T) {
+	dir := t.TempDir()
+	preamble := "+ exec numactl --interleave=all mongod --bind_ip_all --replSet=rs01\n"
+	long := preamble + slowLine("2026-07-17T10:00:00Z", "find", "shop", "orders", 100, nil) + "\n" +
+		slowLine("2026-07-17T10:00:01Z", "find", "shop", "orders", 100, nil) + "\n" +
+		slowLine("2026-07-17T10:00:02Z", "find", "shop", "orders", 100, nil) + "\n"
+	short := preamble + slowLine("2026-07-17T10:05:00Z", "insert", "shop", "orders", 100, nil) + "\n"
+	writeFile(t, filepath.Join(dir, "rs01-0", "mongod.log"), []byte(long))
+	writeFile(t, filepath.Join(dir, "rs01-1", "mongod.log"), []byte(short))
+	files, _, _ := discoverInputs([]string{dir})
+	report := computeTimeline(files, nil, Config{Report: "timeline", Top: -1, Bucket: time.Hour, GroupBy: "optype"})
+	if report.Accepted != 4 || report.Stats.Diagnostics.DuplicateLinesSkipped != 0 {
+		t.Fatalf("accepted=%d duplicates=%d want 4 and 0", report.Accepted, report.Stats.Diagnostics.DuplicateLinesSkipped)
 	}
 }

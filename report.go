@@ -182,6 +182,22 @@ func Execute(cfg Config) (string, int, error) {
 		report.Stats.Skipped = skipped
 		report.Stats.Diagnostics.FilesSkipped = len(skipped)
 		return renderClients(cfg, report)
+	case "events":
+		report := computeEvents(files, discoveryFailures, cfg)
+		if report.Stats.Diagnostics.FilesRead == 0 {
+			return "", 1, noReadableInputError(files, discoveryFailures, skipped)
+		}
+		report.Stats.Skipped = skipped
+		report.Stats.Diagnostics.FilesSkipped = len(skipped)
+		return renderEvents(cfg, report)
+	case "messages":
+		report := computeMessages(files, discoveryFailures, cfg)
+		if report.Stats.Diagnostics.FilesRead == 0 {
+			return "", 1, noReadableInputError(files, discoveryFailures, skipped)
+		}
+		report.Stats.Skipped = skipped
+		report.Stats.Diagnostics.FilesSkipped = len(skipped)
+		return renderMessages(cfg, report)
 	case "analysis":
 		report, err := computeAnalysis(files, discoveryFailures, cfg)
 		if err != nil {
@@ -326,6 +342,13 @@ func writeTerminalMetadata(buf *bytes.Buffer, cfg Config, stats PassStats, slowR
 	buf.WriteString(fmt.Sprintf("Logged slow ops:      %d\n", accepted))
 	buf.WriteString(fmt.Sprintf("Non-slow structured:  %d\n", stats.Diagnostics.NonSlowStructuredLines))
 	buf.WriteString(fmt.Sprintf("Malformed lines:      %d\n", stats.Diagnostics.LinesMalformed))
+	if stats.Diagnostics.DuplicateLinesSkipped > 0 {
+		pairs := make([]string, 0, len(stats.Duplicates))
+		for _, d := range stats.Duplicates {
+			pairs = append(pairs, d.Path+" repeats "+d.Of)
+		}
+		buf.WriteString(fmt.Sprintf("Duplicate lines:      %d skipped (%s)\n", stats.Diagnostics.DuplicateLinesSkipped, strings.Join(pairs, "; ")))
+	}
 	buf.WriteString(fmt.Sprintf("Rejected slow ops:    %d\n", stats.Diagnostics.RejectedSlowOperations))
 }
 
@@ -1185,6 +1208,7 @@ type AnalysisDiagnostics struct {
 	InputFilesRead            int              `json:"inputFilesRead"`
 	InputFilesFailed          int              `json:"inputFilesFailed"`
 	InputFilesSkipped         int              `json:"inputFilesSkipped"`
+	DuplicateLinesSkipped     int64            `json:"duplicateLinesSkipped"`
 	LinesRead                 int64            `json:"linesRead"`
 	ValidStructuredLines      int64            `json:"validStructuredLines"`
 	SlowQueryLines            int64            `json:"slowQueryLines"`
@@ -1596,6 +1620,7 @@ func analysisDiagnostics(d Diagnostics) AnalysisDiagnostics {
 		InputFilesDiscovered:      d.FilesDiscovered,
 		InputFilesRead:            d.FilesRead,
 		InputFilesFailed:          d.FilesFailed,
+		DuplicateLinesSkipped:     d.DuplicateLinesSkipped,
 		LinesRead:                 d.LinesRead,
 		ValidStructuredLines:      d.ValidStructuredLines,
 		SlowQueryLines:            d.SlowQueryLines,

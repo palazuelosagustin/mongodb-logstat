@@ -109,6 +109,7 @@ type Diagnostics struct {
 	FilesRead                      int              `json:"filesRead"`
 	FilesFailed                    int              `json:"filesFailed"`
 	FilesSkipped                   int              `json:"filesSkipped,omitempty"`
+	DuplicateLinesSkipped          int64            `json:"duplicateLinesSkipped,omitempty"`
 	LinesRead                      int64            `json:"linesRead"`
 	LinesMalformed                 int64            `json:"linesMalformed"`
 	RecordsRejected                int64            `json:"recordsRejected"`
@@ -130,6 +131,13 @@ type Diagnostics struct {
 	UnknownOperationTypes          int64            `json:"unknownOperationTypes,omitempty"`
 }
 
+// FileDuplicate records that Path starts with the same content as Of, so its
+// lines already read from Of were skipped.
+type FileDuplicate struct {
+	Path string
+	Of   string
+}
+
 type FileFailure struct {
 	Path   string
 	Reason string
@@ -140,6 +148,7 @@ type PassStats struct {
 	Failures          []FileFailure
 	InputFiles        []string
 	Skipped           []string
+	Duplicates        []FileDuplicate
 	InputObservedFrom *time.Time
 	InputObservedTo   *time.Time
 }
