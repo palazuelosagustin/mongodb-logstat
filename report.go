@@ -15,6 +15,7 @@ import (
 
 type reportEnvelope struct {
 	SchemaVersion int           `json:"schemaVersion"`
+	ToolVersion   string        `json:"toolVersion"`
 	Report        string        `json:"report"`
 	Range         Range         `json:"range"`
 	ObservedRange Range         `json:"observedRange"`
@@ -400,6 +401,7 @@ func newEnvelope(report string, cfg Config, observed Range, stats PassStats) rep
 	}
 	return reportEnvelope{
 		SchemaVersion: schemaVersion,
+		ToolVersion:   toolVersion(),
 		Report:        report,
 		Range:         Range{From: cfg.From, To: cfg.To},
 		ObservedRange: observed,
@@ -1155,6 +1157,7 @@ func topLabel(top int) string {
 // Analysis schema v2.
 type AnalysisReport struct {
 	SchemaVersion       int                  `json:"schemaVersion"`
+	ToolVersion         string               `json:"toolVersion"`
 	Report              string               `json:"report"`
 	GeneratedAt         string               `json:"generatedAt"`
 	Semantics           AnalysisSemantics    `json:"semantics"`
@@ -1587,6 +1590,7 @@ func computeAnalysis(files []string, discoveryFailures []FileFailure, cfg Config
 	report := AnalysisReport{
 		Nodes:         nodes,
 		SchemaVersion: analysisSchema,
+		ToolVersion:   toolVersion(),
 		Report:        "analysis",
 		GeneratedAt:   formatJSONTime(time.Now()),
 		Semantics: AnalysisSemantics{

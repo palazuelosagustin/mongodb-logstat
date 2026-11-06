@@ -189,5 +189,5 @@ func hasFlag(args []string, name string) bool {
 }
 
 func usageText() string {
-	return "usage: mongodb-logstat --report timeline|queries|clients|analysis|events|messages|connections [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]"
+	return "usage: mongodb-logstat --report timeline|queries|clients|analysis|events|messages|connections [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]\n       mongodb-logstat --version"
 }

@@ -24,17 +24,21 @@ replica-set names and paths as logged.
 
 1. `command -v mongodb-logstat`
 2. Otherwise the repo checkout, e.g. `~/bin/mongodb-logstat/mongodb-logstat`
-3. Otherwise build it **into a scratch path**: `go build -o /tmp/mongodb-logstat .`
+3. Otherwise download the latest release: `https://github.com/palazuelosagustin/mongodb-logstat/releases/latest/download/mongodb-logstat_<darwin|linux>_<arm64|amd64>.tar.gz` (see README Install)
+4. Otherwise build it **into a scratch path**: `go build -o /tmp/mongodb-logstat .`
    from the repo root. Do not run `go build` or `go build ./...` in the repo
    to check compilation: the repo has a single main package, so that
    overwrites the user's binary. Use `go vet ./...` / `go test ./...`.
 
 If you changed the source in this session, rebuild before running.
+`mongodb-logstat --version` (and `toolVersion` in JSON) names the build; quote
+it with results you save or share.
 
 ## Usage
 
 ```text
 mongodb-logstat --report timeline|queries|clients|analysis|events|messages|connections [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+       mongodb-logstat --version
 ```
 
 ### Input rules

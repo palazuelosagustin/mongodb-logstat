@@ -12,6 +12,10 @@ func main() {
 }
 
 func run(args []string, stdout, stderr *os.File) int {
+	if isVersionRequest(args) {
+		fmt.Fprintln(stdout, versionLine())
+		return 0
+	}
 	cfg, err := parseCLI(args)
 	if err != nil {
 		if errors.Is(err, errUsage) {
