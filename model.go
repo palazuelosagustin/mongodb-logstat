@@ -149,6 +149,9 @@ type PassStats struct {
 	InputFiles        []string
 	Skipped           []string
 	Duplicates        []FileDuplicate
+	Files             map[string]*fileInfo // per file label: identity, time range, slow ops
+	NodeOf            map[string]string    // file label -> node
+	Nodes             []NodeSummary
 	InputObservedFrom *time.Time
 	InputObservedTo   *time.Time
 }

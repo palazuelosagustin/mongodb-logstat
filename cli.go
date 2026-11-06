@@ -36,7 +36,7 @@ func parseCLI(args []string) (Config, error) {
 	to := fs.String("to", "", "upper time bound: RFC3339, or UTC without zone")
 	bucket := fs.String("bucket", "1h", "timeline bucket size")
 	fs.StringVar(&cfg.Report, "report", "", "timeline|queries|clients|analysis|events|messages")
-	fs.StringVar(&cfg.GroupBy, "group-by", "optype", "timeline grouping: optype|namespace|query|category")
+	fs.StringVar(&cfg.GroupBy, "group-by", "optype", "timeline grouping: optype|namespace|query|category|node")
 	fs.IntVar(&cfg.Top, "top", -1, "limit rows or columns to the top N; 0 prints all")
 	fs.BoolVar(&cfg.JSON, "json", false, "emit JSON")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "print per-file failures to stderr")
@@ -79,7 +79,7 @@ func parseCLI(args []string) (Config, error) {
 
 	cfg.GroupBy = strings.TrimSpace(cfg.GroupBy)
 	switch cfg.GroupBy {
-	case "optype", "namespace", "query", "category":
+	case "optype", "namespace", "query", "category", "node":
 	default:
 		return Config{}, fmt.Errorf("invalid --group-by: %q", cfg.GroupBy)
 	}
@@ -181,5 +181,5 @@ func hasFlag(args []string, name string) bool {
 }
 
 func usageText() string {
-	return "usage: mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]"
+	return "usage: mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]"
 }

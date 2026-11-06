@@ -14,11 +14,12 @@ import (
 )
 
 type reportEnvelope struct {
-	SchemaVersion int         `json:"schemaVersion"`
-	Report        string      `json:"report"`
-	Range         Range       `json:"range"`
-	ObservedRange Range       `json:"observedRange"`
-	Diagnostics   Diagnostics `json:"diagnostics"`
+	SchemaVersion int           `json:"schemaVersion"`
+	Report        string        `json:"report"`
+	Range         Range         `json:"range"`
+	ObservedRange Range         `json:"observedRange"`
+	Diagnostics   Diagnostics   `json:"diagnostics"`
+	Nodes         []NodeSummary `json:"nodes"`
 }
 
 type timelineRowJSON struct {
@@ -248,7 +249,7 @@ func noReadableInputError(files []string, discoveryFailures []FileFailure, skipp
 func renderTimeline(cfg Config, report TimelineReport) (string, int, error) {
 	if cfg.JSON {
 		body := timelineReportJSON{
-			reportEnvelope: newEnvelope("timeline", cfg, report.Observed, report.Stats.Diagnostics),
+			reportEnvelope: newEnvelope("timeline", cfg, report.Observed, report.Stats),
 			GroupBy:        cfg.GroupBy,
 			Bucket:         cfg.Bucket.String(),
 			Columns:        report.Columns,
@@ -288,7 +289,7 @@ func renderTimeline(cfg Config, report TimelineReport) (string, int, error) {
 func renderQueries(cfg Config, report QueriesReport) (string, int, error) {
 	if cfg.JSON {
 		body := queriesReportJSON{
-			reportEnvelope: newEnvelope("queries", cfg, report.Observed, report.Stats.Diagnostics),
+			reportEnvelope: newEnvelope("queries", cfg, report.Observed, report.Stats),
 			Rows:           report.Rows,
 		}
 		return marshalJSON(body)
@@ -335,6 +336,7 @@ func writeTerminalMetadata(buf *bytes.Buffer, cfg Config, stats PassStats, slowR
 		buf.WriteString(fmt.Sprintf("Skipped files:        %d not MongoDB logs (--verbose lists them)\n", len(stats.Skipped)))
 	}
 	buf.WriteString(fmt.Sprintf("Files:                %s\n", strings.Join(stats.InputFiles, ",")))
+	writeNodesTable(buf, stats)
 	buf.WriteString(fmt.Sprintf("Requested range:      %s to %s\n", formatRequestedTime(cfg.From), formatRequestedTime(cfg.To)))
 	buf.WriteString(fmt.Sprintf("Input log range:      %s to %s\n", formatMaybeTime(stats.InputObservedFrom), formatMaybeTime(stats.InputObservedTo)))
 	buf.WriteString(fmt.Sprintf("Slow-operation range: %s to %s\n", formatMaybeTime(slowRange.From), formatMaybeTime(slowRange.To)))
@@ -380,15 +382,21 @@ func formatRequestedTime(ts *time.Time) string {
 	return ts.UTC().Format(time.RFC3339)
 }
 
-func newEnvelope(report string, cfg Config, observed Range, diagnostics Diagnostics) reportEnvelope {
+func newEnvelope(report string, cfg Config, observed Range, stats PassStats) reportEnvelope {
+	diagnostics := stats.Diagnostics
 	diagnostics.InputStatus = inputStatus(diagnostics.FilesRead, diagnostics.FilesFailed)
 	diagnostics.PartialInput = diagnostics.InputStatus == "partial"
+	nodes := stats.Nodes
+	if nodes == nil {
+		nodes = []NodeSummary{}
+	}
 	return reportEnvelope{
 		SchemaVersion: schemaVersion,
 		Report:        report,
 		Range:         Range{From: cfg.From, To: cfg.To},
 		ObservedRange: observed,
 		Diagnostics:   diagnostics,
+		Nodes:         nodes,
 	}
 }
 
@@ -418,6 +426,18 @@ func computeTimeline(files []string, discoveryFailures []FileFailure, cfg Config
 	parseFiles(files, parseOptions{From: cfg.From, To: cfg.To}, func(op *SlowOperation) {
 		groupCounts[timelineGroupValue(cfg.GroupBy, op)]++
 	}, &pass1)
+	groupOf := func(op *SlowOperation) string { return timelineGroupValue(cfg.GroupBy, op) }
+	if cfg.GroupBy == "node" {
+		// Node identity is only known once a file has been read: pass 1
+		// counted by file, pass 2 groups by the node pass 1 found.
+		finalizeStats(&pass1)
+		byNode := map[string]int{}
+		for file, n := range groupCounts {
+			byNode[pass1.nodeOf(file)] += n
+		}
+		groupCounts = byNode
+		groupOf = func(op *SlowOperation) string { return pass1.nodeOf(op.SourceFile) }
+	}
 
 	columns := selectTimelineColumns(groupCounts, effectiveTop(cfg, "timeline"))
 	columnSet := map[string]struct{}{}
@@ -448,7 +468,7 @@ func computeTimeline(files []string, discoveryFailures []FileFailure, cfg Config
 		}
 		row.total++
 
-		group := timelineGroupValue(cfg.GroupBy, op)
+		group := groupOf(op)
 		if _, ok := columnSet[group]; !ok && len(columns) > 0 {
 			group = "other"
 		}
@@ -640,6 +660,7 @@ func fileLabels(paths []string) map[string]string {
 }
 
 func finalizeStats(stats *PassStats) {
+	buildNodes(stats)
 	stats.Diagnostics.InputStatus = inputStatus(stats.Diagnostics.FilesRead, stats.Diagnostics.FilesFailed)
 	stats.Diagnostics.PartialInput = stats.Diagnostics.InputStatus == "partial"
 }
@@ -944,6 +965,8 @@ func timelineGroupValue(groupBy string, op *SlowOperation) string {
 		return op.ShapeLabel
 	case "category":
 		return op.Category
+	case "node":
+		return op.SourceFile // mapped to its node by computeTimeline
 	default:
 		return op.Operation
 	}
@@ -1130,6 +1153,7 @@ type AnalysisReport struct {
 	Ranges              AnalysisRanges       `json:"ranges"`
 	Options             AnalysisOptions      `json:"options"`
 	Diagnostics         AnalysisDiagnostics  `json:"diagnostics"`
+	Nodes               []NodeSummary        `json:"nodes"`
 	Global              AnalysisGlobal       `json:"global"`
 	Timeline            []AnalysisBucket     `json:"timeline"`
 	HotWindows          []AnalysisHotWindow  `json:"hotWindows"`
@@ -1530,7 +1554,12 @@ func computeAnalysis(files []string, discoveryFailures []FileFailure, cfg Config
 	durationSeconds := analysisDurationSeconds(cfg, pass, Range{From: slowFrom, To: slowTo})
 	indicators := analysisIndicators(shapeAggs)
 
+	nodes := pass.Nodes
+	if nodes == nil {
+		nodes = []NodeSummary{}
+	}
 	report := AnalysisReport{
+		Nodes:         nodes,
 		SchemaVersion: analysisSchema,
 		Report:        "analysis",
 		GeneratedAt:   formatJSONTime(time.Now()),

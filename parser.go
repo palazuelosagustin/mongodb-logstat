@@ -98,6 +98,7 @@ func parseLog(src *logSource, label string, copies map[string]*copyGroup, dedupe
 			skipLines = group.lines
 		}
 	}
+	info := stats.fileInfo(label)
 	reader := bufio.NewReader(src.Reader)
 	var lineNumber int64
 	var skipped int64
@@ -155,8 +156,12 @@ func parseLog(src *logSource, label string, copies map[string]*copyGroup, dedupe
 		if !ok {
 			continue
 		}
+		if id, ok := asInt64(raw["id"]); ok && identityLogIDs[id] {
+			observeIdentity(info, id, raw)
+		}
 		if ts, ok := parseTimestamp(raw["t"]); ok {
 			updateObservedRange(&stats.InputObservedFrom, &stats.InputObservedTo, ts)
+			updateObservedRange(&info.From, &info.To, ts)
 			if opts.OnStructured != nil {
 				opts.OnStructured(ts)
 			}
@@ -186,6 +191,7 @@ func parseLog(src *logSource, label string, copies map[string]*copyGroup, dedupe
 		}
 
 		stats.Diagnostics.AcceptedSlowOperations++
+		info.SlowOps++
 		if op.Truncated {
 			stats.Diagnostics.TruncatedSlowOperations++
 		}

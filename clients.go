@@ -200,7 +200,7 @@ func renderClients(cfg Config, report ClientsReport) (string, int, error) {
 			displayedMs += row.CumulativeDurationMs
 		}
 		body := clientsReportJSON{
-			reportEnvelope: newEnvelope("clients", cfg, report.Observed, report.Stats.Diagnostics),
+			reportEnvelope: newEnvelope("clients", cfg, report.Observed, report.Stats),
 			Ranking:        report.Ranking,
 			Top:            report.TopLimit,
 			Totals: clientsTotalsJSON{

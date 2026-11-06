@@ -47,7 +47,7 @@ func TestEventsReport(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Events report (7 events: ",
-		"rs0/mongod.log  start",
+		"rs0:27017  start",
 		"host rs0 port 27017 pid 7 dbPath /data",
 		"version        8.0.12-4",
 		"SECONDARY -> PRIMARY",
@@ -78,6 +78,7 @@ func TestEventsReport(t *testing.T) {
 		Kinds  map[string]int `json:"kinds"`
 		Events []struct {
 			Time  string         `json:"time"`
+			Node  string         `json:"node"`
 			File  string         `json:"file"`
 			Line  int64          `json:"line"`
 			Kind  string         `json:"kind"`
@@ -92,6 +93,9 @@ func TestEventsReport(t *testing.T) {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 	first := body.Events[0]
+	if first.Node != "rs0:27017" || first.File != "rs0/mongod.log" {
+		t.Fatalf("first event node/file: %+v", first)
+	}
 	if first.Time != "2026-07-17T10:00:00.000Z" || first.Kind != "start" || first.Line != 1 || first.LogID != 4615611 || first.Facts["host"] != "rs0" {
 		t.Fatalf("first event: %+v", first)
 	}
@@ -132,7 +136,7 @@ func TestMessagesReport(t *testing.T) {
 	for _, want := range []string{
 		"Messages report (fatal/error/warning: 0 F, 1 E, 4 W lines in 3 groups, top all",
 		"E    REPL       21122  1      2026-07-17T10:04:00.000Z",
-		"W    NETWORK    23234  3      2026-07-17T09:59:00.000Z  2026-07-17T10:01:00.000Z  2 files",
+		"W    NETWORK    23234  3      2026-07-17T09:59:00.000Z  2026-07-17T10:01:00.000Z  2 nodes",
 	} {
 		if !strings.Contains(squash(out), squash(want)) {
 			t.Fatalf("missing %q:\n%s", want, out)

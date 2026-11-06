@@ -42,6 +42,7 @@ type MessageRow struct {
 	Count     int            `json:"count"`
 	First     string         `json:"first"`
 	Last      string         `json:"last"`
+	Nodes     map[string]int `json:"nodes"`
 	Files     map[string]int `json:"files"`
 	Sample    MessageSample  `json:"sample"`
 }
@@ -208,6 +209,7 @@ func computeMessages(files []string, discoveryFailures []FileFailure, cfg Config
 			Count:     agg.count,
 			First:     formatEventTime(agg.first),
 			Last:      formatEventTime(agg.last),
+			Nodes:     nodeCounts(report.Stats, agg.files),
 			Files:     agg.files,
 			Sample:    agg.sample,
 		})
@@ -218,7 +220,7 @@ func computeMessages(files []string, discoveryFailures []FileFailure, cfg Config
 func renderMessages(cfg Config, report MessagesReport) (string, int, error) {
 	if cfg.JSON {
 		body := messagesReportJSON{
-			reportEnvelope: newEnvelope("messages", cfg, report.Observed, report.Stats.Diagnostics),
+			reportEnvelope: newEnvelope("messages", cfg, report.Observed, report.Stats),
 			Severities:     messageSeverities,
 			Lines:          report.Lines,
 			BySeverity:     report.BySeverity,
@@ -243,9 +245,9 @@ func renderMessages(cfg Config, report MessagesReport) (string, int, error) {
 		return buf.String(), 0, nil
 	}
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
-	fmt.Fprint(tw, "sev\tcomponent\tid\tcount\tfirst\tlast\tfiles\tmsg\n")
+	fmt.Fprint(tw, "sev\tcomponent\tid\tcount\tfirst\tlast\tnodes\tmsg\n")
 	for _, row := range report.Rows {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n", row.Severity, row.Component, row.LogID, row.Count, row.First, row.Last, fileCountLabel(row.Files), truncateRunes(row.Msg, 90))
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n", row.Severity, row.Component, row.LogID, row.Count, row.First, row.Last, countLabel(row.Nodes, "nodes"), truncateRunes(row.Msg, 90))
 	}
 	if err := tw.Flush(); err != nil {
 		return "", 1, err
@@ -253,15 +255,13 @@ func renderMessages(cfg Config, report MessagesReport) (string, int, error) {
 	return buf.String(), 0, nil
 }
 
-// fileCountLabel is the file name when one file logged the message,
-// otherwise "N files" (JSON has the per-file counts).
-func fileCountLabel(files map[string]int) string {
-	if len(files) == 1 {
-		for name := range files {
-			return name
-		}
+// nodeCounts folds per-file counts into per-node counts.
+func nodeCounts(stats PassStats, files map[string]int) map[string]int {
+	out := make(map[string]int, len(files))
+	for file, n := range files {
+		out[stats.nodeOf(file)] += n
 	}
-	return fmt.Sprintf("%d files", len(files))
+	return out
 }
 
 func truncateRunes(s string, n int) string {

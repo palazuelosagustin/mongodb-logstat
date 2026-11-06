@@ -16,6 +16,7 @@ import (
 
 type EventRow struct {
 	Time   time.Time      `json:"-"`
+	Node   string         `json:"node"`
 	File   string         `json:"file"`
 	Line   int64          `json:"line"`
 	Kind   string         `json:"kind"`
@@ -180,6 +181,9 @@ func computeEvents(files []string, discoveryFailures []FileFailure, cfg Config) 
 		updateObservedRange(&report.Observed.From, &report.Observed.To, op.Timestamp)
 	}, &report.Stats)
 	finalizeStats(&report.Stats)
+	for i := range report.Rows {
+		report.Rows[i].Node = report.Stats.nodeOf(report.Rows[i].File)
+	}
 	sort.SliceStable(report.Rows, func(i, j int) bool {
 		a, b := report.Rows[i], report.Rows[j]
 		if !a.Time.Equal(b.Time) {
@@ -196,7 +200,7 @@ func computeEvents(files []string, discoveryFailures []FileFailure, cfg Config) 
 func renderEvents(cfg Config, report EventsReport) (string, int, error) {
 	if cfg.JSON {
 		body := eventsReportJSON{
-			reportEnvelope: newEnvelope("events", cfg, report.Observed, report.Stats.Diagnostics),
+			reportEnvelope: newEnvelope("events", cfg, report.Observed, report.Stats),
 			Kinds:          report.Kinds,
 			Events:         make([]eventRowJSON, 0, len(report.Rows)),
 		}
@@ -215,9 +219,9 @@ func renderEvents(cfg Config, report EventsReport) (string, int, error) {
 		return buf.String(), 0, nil
 	}
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
-	fmt.Fprint(tw, "time\tfile\tkind\tdetail\n")
+	fmt.Fprint(tw, "time\tnode\tkind\tdetail\n")
 	for _, row := range report.Rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", formatEventTime(row.Time), row.File, row.Kind, row.Detail)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", formatEventTime(row.Time), row.Node, row.Kind, row.Detail)
 	}
 	if err := tw.Flush(); err != nil {
 		return "", 1, err

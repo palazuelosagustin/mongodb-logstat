@@ -15,7 +15,7 @@ go build -o mongodb-logstat .
 ## Usage
 
 ```text
-mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 Flags may appear before or after input paths. Inputs can be files, directories, or a mix of both.
@@ -54,6 +54,8 @@ Bucketed terminal or JSON report for spotting slow-operation time windows.
 ./mongodb-logstat --report timeline --bucket 30m --group-by namespace --top 10 /path/to/logs
 ./mongodb-logstat --report timeline --json /path/to/mongod.log > timeline.json
 ```
+
+`--group-by node` shows slow operations per mongod/mongos (see [Nodes](#nodes)), which shows which member or router was slow when in a cluster dump.
 
 `--group-by optype` uses normalized operations such as `find`, `aggregate`, `getMore`, `update`, `delete`, `internal`, and `other`; raw internal command names such as `configTerm` are not exposed as workload columns.
 
@@ -109,7 +111,7 @@ The report includes:
 
 ### `events`
 
-Time-ordered list of process, replica-set and configuration events, one row per event with time (millisecond precision, UTC), file, kind, and the facts the log states. It reports facts only: no thresholds, levels, or verdicts. Logs from several nodes are merged in time order, so a cluster dump reads as one timeline.
+Time-ordered list of process, replica-set and configuration events, one row per event with time (millisecond precision, UTC), node, kind, and the facts the log states. It reports facts only: no thresholds, levels, or verdicts. Logs from several nodes are merged in time order, so a cluster dump reads as one timeline.
 
 ```bash
 ./mongodb-logstat --report events /path/to/cluster-dump
@@ -133,18 +135,34 @@ Time-ordered list of process, replica-set and configuration events, one row per 
 | `initialSyncStart` / `initialSyncDone` | 21164 / 21163 | attempt / duration |
 | `fcv` | 20459 | featureCompatibilityVersion being set |
 
-JSON (`schemaVersion` 1) has `kinds` (count per kind) and `events[]` with `time`, `file`, `line`, `kind`, `logId`, `detail`, and `facts` (the attribute values behind the detail). `--top` does not apply.
+JSON (`schemaVersion` 1) has `kinds` (count per kind) and `events[]` with `time`, `node`, `file`, `line`, `kind`, `logId`, `detail`, and `facts` (the attribute values behind the detail). `--top` does not apply.
 
 ### `messages`
 
-Warning, error and fatal lines (`"s"` of `W`, `E`, `F`) grouped by severity, component, log id and message, with count, first and last time, and the files that logged them. Sorted by severity (fatal first), then count. `--top N` limits the groups shown; the header and JSON account for the omitted groups and lines.
+Warning, error and fatal lines (`"s"` of `W`, `E`, `F`) grouped by severity, component, log id and message, with count, first and last time, and the nodes that logged them. Sorted by severity (fatal first), then count. `--top N` limits the groups shown; the header and JSON account for the omitted groups and lines.
 
 ```bash
 ./mongodb-logstat --report messages /path/to/logs
 ./mongodb-logstat --report messages --json --top 50 /path/to/logs
 ```
 
-JSON (`schemaVersion` 1) has `lines`, `bySeverity`, `groups`, `omittedGroups`, `omittedLines`, and `messages[]` with `severity`, `component`, `logId`, `msg`, `count`, `first`, `last`, `files` (count per file), and `sample` (file, line, and attributes of the first occurrence). In the sample, values under query-like keys (`cmd`, `command`, `filter`, `q`, `u`, `pipeline`, `keyValue`, `doc`, and similar) are replaced by type markers, and strings longer than 300 bytes are cut. Error codes, error messages and host names are kept.
+JSON (`schemaVersion` 1) has `lines`, `bySeverity`, `groups`, `omittedGroups`, `omittedLines`, and `messages[]` with `severity`, `component`, `logId`, `msg`, `count`, `first`, `last`, `nodes` and `files` (count per node and per file), and `sample` (file, line, and attributes of the first occurrence). In the sample, values under query-like keys (`cmd`, `command`, `filter`, `q`, `u`, `pipeline`, `keyValue`, `doc`, and similar) are replaced by type markers, and strings longer than 300 bytes are cut. Error codes, error messages and host names are kept.
+
+## Nodes
+
+Each input file is attributed to the mongod or mongos that wrote it, so a directory with logs from a whole cluster, including rotated daily files, reads as a set of nodes. Identity comes from lines MongoDB writes at startup and again at every log rotation (6.0 and later):
+
+| log id | message | gives |
+|---|---|---|
+| 4615611 | `MongoDB starting` | host, port (mongod) |
+| 20721 | `Process Details` | host, port (mongod and mongos, also at rotation) |
+| 20722, 21392 | `Node is a member of a replica set`, `New replica set config in use` | replica set name |
+| 21951 | `Options set by command line` | port, replica set, `sharding.clusterRole`, mongos (`sharding.configDB`) |
+| 23403 | `Build Info` | version (mongos when logged from `mongosMain`) |
+
+Files with the same `host:port` merge into one node. A file without host lines (for example a mongos log that starts at process start, or a fragment) is its own node, named by its file label. A copy of another file belongs to the node of the file it repeats.
+
+The terminal header lists the nodes (process, replica set, role, version, number of files, log range, slow operations) when any file had an identity line. Every JSON report has `nodes[]` with `node`, `host`, `port`, `process`, `replSet`, `clusterRole`, `version`, `files`, `from`, `to`, and `slowOperations`. `events` show the node of each event (`node` and `file` in JSON), and `messages` count lines per node (`nodes`, plus `files`, in JSON).
 
 ## Query Identity
 
