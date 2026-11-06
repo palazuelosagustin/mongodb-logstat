@@ -1,4 +1,4 @@
 interface:
   display_name: "MongoDB Logstat"
-  short_description: "Analyze MongoDB slow-query logs"
-  default_prompt: "Use $mongodb-logstat-skill to analyze a MongoDB slow-query log and recommend the most useful report and flags."
+  short_description: "Analyze MongoDB logs: events, warnings, slow queries, clients"
+  default_prompt: "Use $mongodb-logstat-skill to analyze the MongoDB logs of a support case: events, warnings and errors, slow operations, and clients."

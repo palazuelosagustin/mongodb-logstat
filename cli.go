@@ -28,22 +28,8 @@ type Config struct {
 }
 
 func parseCLI(args []string) (Config, error) {
-	fs := flag.NewFlagSet("mongodb-logstat", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-
 	cfg := Config{Top: -1, FillGaps: true, MaxBuckets: 10000}
-	from := fs.String("from", "", "lower time bound: RFC3339, or UTC without zone")
-	to := fs.String("to", "", "upper time bound: RFC3339, or UTC without zone")
-	bucket := fs.String("bucket", "1h", "timeline bucket size")
-	fs.StringVar(&cfg.Report, "report", "", "timeline|queries|clients|analysis|events|messages")
-	fs.StringVar(&cfg.GroupBy, "group-by", "optype", "timeline grouping: optype|namespace|query|category|node")
-	fs.IntVar(&cfg.Top, "top", -1, "limit rows or columns to the top N; 0 prints all")
-	fs.BoolVar(&cfg.JSON, "json", false, "emit JSON")
-	fs.BoolVar(&cfg.Verbose, "verbose", false, "print per-file failures to stderr")
-	fs.StringVar(&cfg.SortBy, "sort-by", "total-duration", "analysis/query/client ranking: total-duration|count|p95|max|docs-examined")
-	fs.BoolVar(&cfg.IncludeInternal, "include-internal", false, "include internal commands in main analysis/query ranking")
-	fs.BoolVar(&cfg.FillGaps, "fill-gaps", true, "emit explicit zero buckets in analysis timeline")
-	fs.IntVar(&cfg.MaxBuckets, "max-buckets", 10000, "maximum analysis timeline buckets")
+	fs, from, to, bucket := newCLIFlagSet(&cfg)
 
 	normalized := normalizeCLIArgs(args)
 	reportProvided := hasFlag(normalized, "report")
@@ -130,6 +116,28 @@ func parseTimeArg(value string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("%q: expected RFC3339 (2026-11-04T13:30:00Z) or a UTC time without zone (2026-11-04T13:30, 2026-11-04)", value)
+}
+
+// newCLIFlagSet defines every command-line flag on cfg. It returns the time
+// and bucket flags, which parseCLI validates itself.
+func newCLIFlagSet(cfg *Config) (fs *flag.FlagSet, from, to, bucket *string) {
+	fs = flag.NewFlagSet("mongodb-logstat", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	from = fs.String("from", "", "lower time bound: RFC3339, or UTC without zone")
+	to = fs.String("to", "", "upper time bound: RFC3339, or UTC without zone")
+	bucket = fs.String("bucket", "1h", "timeline bucket size")
+	fs.StringVar(&cfg.Report, "report", "", "timeline|queries|clients|analysis|events|messages")
+	fs.StringVar(&cfg.GroupBy, "group-by", "optype", "timeline grouping: optype|namespace|query|category|node")
+	fs.IntVar(&cfg.Top, "top", -1, "limit rows or columns to the top N; 0 prints all")
+	fs.BoolVar(&cfg.JSON, "json", false, "emit JSON")
+	fs.BoolVar(&cfg.Verbose, "verbose", false, "print per-file failures to stderr")
+	fs.StringVar(&cfg.SortBy, "sort-by", "total-duration", "analysis/query/client ranking: total-duration|count|p95|max|docs-examined")
+	fs.BoolVar(&cfg.IncludeInternal, "include-internal", false, "include internal commands in main analysis/query ranking")
+	fs.BoolVar(&cfg.FillGaps, "fill-gaps", true, "emit explicit zero buckets in analysis timeline")
+	fs.IntVar(&cfg.MaxBuckets, "max-buckets", 10000, "maximum analysis timeline buckets")
+
+	return fs, from, to, bucket
 }
 
 func normalizeCLIArgs(args []string) []string {

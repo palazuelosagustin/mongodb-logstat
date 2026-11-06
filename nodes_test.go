@@ -118,3 +118,37 @@ func TestNodesTableHiddenWithoutIdentity(t *testing.T) {
 		t.Fatalf("nodes table without identity:\n%s", out)
 	}
 }
+
+func TestHotWindowsNameTheirShapes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mongod.log")
+	writeLog(t, path,
+		slowLine("2026-09-01T10:00:00Z", "find", "shop", "orders", 300, nil),
+		slowLine("2026-09-01T10:10:00Z", "insert", "shop", "events", 100, nil),
+	)
+	out, _, err := Execute(Config{Report: "analysis", Top: -1, Bucket: time.Hour, GroupBy: "optype", SortBy: "total-duration", MaxBuckets: 100, FillGaps: true, Inputs: []string{path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		HotWindows []struct {
+			DominantShapeKeys []string `json:"dominantShapeKeys"`
+			DominantShapes    []struct {
+				ShapeKey   string  `json:"shapeKey"`
+				Label      string  `json:"label"`
+				DurationMs int64   `json:"cumulativeDurationMs"`
+				SharePct   float64 `json:"durationSharePct"`
+			} `json:"dominantShapes"`
+		} `json:"hotWindows"`
+	}
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		t.Fatal(err)
+	}
+	w := body.HotWindows[0]
+	if len(w.DominantShapes) != 2 || w.DominantShapes[0].ShapeKey != w.DominantShapeKeys[0] {
+		t.Fatalf("window: %+v", w)
+	}
+	top := w.DominantShapes[0]
+	if !strings.HasPrefix(top.Label, "find:shop.orders#") || top.DurationMs != 300 || top.SharePct != 75 {
+		t.Fatalf("top shape: %+v", top)
+	}
+}

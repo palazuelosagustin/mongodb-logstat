@@ -105,7 +105,7 @@ The report includes:
 - requested, input-observed, and accepted slow-operation ranges;
 - diagnostics for partial input, malformed lines, filtering, canonicalization fallback, and unassociated `getMore`;
 - filled timeline buckets for FTDC correlation;
-- hot windows ranked by cumulative slow-operation duration;
+- hot windows ranked by cumulative slow-operation duration, each with `dominantShapes` (shape key, readable `label` such as `find:shop.orders#1a2b3c4d`, cumulative duration and its share of the window);
 - ranked query shapes with globally unique `shapeKey` values, redacted structure, observed operations, cursor counts, latency, cumulative impact, optional metric aggregates, `planEvidence`, indicators, and worst sample reference;
 - top namespaces, compact internal-operation summaries, and omitted-data accounting.
 
@@ -196,6 +196,14 @@ Input status: partial (1/3 files read successfully)
 ```
 
 JSON reports include diagnostics. If no input file can be read successfully, the tool exits with code `1` and emits no report body.
+
+## Agent skills
+
+`skills/.claude/mongodb-logstat` (Claude Code) and `.codex/skills/mongodb-logstat-skill` (Codex) teach an agent which report to run, in which order, how to read the header and each report, and `jq` recipes for the JSON (`references/json.md`). Both carry the same text; `readme_test.go` fails when they drift apart or when their usage line no longer matches the CLI. To make the Claude skill available in every session:
+
+```bash
+ln -s ~/bin/mongodb-logstat/skills/.claude/mongodb-logstat ~/.claude/skills/mongodb-logstat
+```
 
 ## Test
 

@@ -1,197 +1,200 @@
 ---
 name: mongodb-logstat-skill
-description: Analyze MongoDB slow-query JSON logs with the local mongodb-logstat CLI. Use when Codex needs to summarize logged slow operations, build timelines, inspect or explain query-shape reports, generate AI-ready analysis JSON, choose flags, write reports to files, or answer mongodb-logstat CLI usage questions without consulting --help.
+description: Run and interpret mongodb-logstat, a Go CLI that reads MongoDB / Percona Server for MongoDB structured JSON logs (5.0 and later, mongod and mongos, plain, gzip, syslog/journald or Kubernetes pod logs, one file or a whole cluster dump) and reports process and replica-set events, grouped warnings and errors, slow-operation timelines, ranked query shapes, slow operations per client/user, and redacted AI-ready analysis JSON. Use when the user has mongod/mongos logs for a support case and wants to know what happened and when, which node restarted, stepped down or lost its sync source, which warnings or errors were logged, which queries were slow, which client sent them, or which mongodb-logstat report or flags to use; also when they paste mongodb-logstat output to explain, or when changing mongodb-logstat code or docs. Not for FTDC diagnostic.data (use mongodb-ftdcstat) or for sanitizing customer data (use mongodb-log-obfuscator-go).
 ---
 
-# MongoDB Logstat
+# mongodb-logstat
 
-Use the local `mongodb-logstat` project in this repo to inspect MongoDB structured JSON slow-operation logs.
+Reads MongoDB structured JSON logs and prints terminal reports or JSON. It
+takes files and directories (recursively): point it at a whole case folder
+and it reads every MongoDB log in it, skips everything else (FTDC, YAML,
+pt-stalk output, empty files), counts a log and its `.gz` copy once, and
+attributes every file to the node (mongod/mongos) that wrote it.
 
-## Quick Start
+## Privacy first
 
-Prefer the built binary when it exists in the repo root:
+Customer logs contain hostnames, IPs, user names, namespaces, and query
+values. For support cases, sanitize with `mongodb-log-obfuscator-go` first
+unless the user says the data is not sensitive. `analysis` never prints
+query values; `messages` samples replace query-like attributes with type
+markers but keep error text and host names; `events` print host names,
+replica-set names and paths as logged.
 
-```bash
-./mongodb-logstat --report timeline /path/to/mongod.log
-```
+## Locating the binary
 
-If the binary is missing or stale, build it first:
+1. `command -v mongodb-logstat`
+2. Otherwise the repo checkout, e.g. `~/bin/mongodb-logstat/mongodb-logstat`
+3. Otherwise build it **into a scratch path**: `go build -o /tmp/mongodb-logstat .`
+   from the repo root. Do not run `go build` or `go build ./...` in the repo
+   to check compilation: the repo has a single main package, so that
+   overwrites the user's binary. Use `go vet ./...` / `go test ./...`.
 
-```bash
-go build -o mongodb-logstat .
-```
+If you changed the source in this session, rebuild before running.
 
-Flags may appear before or after input paths.
-
-## CLI Reference
-
-Usage syntax:
+## Usage
 
 ```text
-mongodb-logstat --report timeline|queries|clients|analysis [--json] [--from RFC3339] [--to RFC3339] [--bucket 1h] [--group-by optype|namespace|query|category] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
-Accepted inputs:
-- one or more files
-- one or more directories
-- mixed files and directories
+### Input rules
 
-Defaults:
-- `--report` is required; there is no default report
-- `--bucket 1h`
-- `--group-by optype`
-- `--top` unset means default top `20` for `queries`, query-grouped timelines, and `analysis`; `clients` defaults to all correlated user/client groups; `--top 0` means all
-- `--sort-by total-duration` for queries and analysis; `clients` defaults to `count`
-- `--include-internal false`
-- `--fill-gaps true`
-- `--max-buckets 10000`
-- `--json false`
-- `--verbose false`
-- `--from` unset
-- `--to` unset
+- Supported: structured JSON logs, MongoDB 5.0 and later (tested on 6.0,
+  7.0, 8.0, 8.2). A 4.2-or-older text log fails with that reason; if nothing
+  can be read the tool exits 1 and lists why per file.
+- Read as found: `.gz` (by content, not name), Kubernetes pod logs with a
+  shell preamble, `kubectl logs --timestamps` / `docker logs -t` prefixes,
+  syslog/journald lines (`Nov 02 10:13:11 host mongod[2619]: {...}`).
+- Directories: non-log files are skipped (`Skipped files: N`, listed with
+  `--verbose`). A file named on the command line is never skipped.
+- Copies: a file that starts with the same lines as one already read (log
+  next to its `.gz`, an earlier snapshot) only adds its new lines; the header
+  shows `Duplicate lines: N skipped (copy repeats original)`.
+- `--from` is inclusive, `--to` exclusive; RFC3339 or a time without zone,
+  read as UTC (`2026-11-04T13:30`, `2026-11-04`). They apply to every report.
 
-Flag details:
-- `--report`: required; `timeline`, `queries`, `clients`, or `analysis`
-- `--json`: emit JSON for v1 reports; `analysis` is always JSON
-- `--from`: inclusive RFC3339 lower time bound
-- `--to`: exclusive RFC3339 upper time bound
-- `--bucket`: positive Go duration string, such as `30m`, `1h`, or `2h`
-- `--group-by`: `optype`, `namespace`, `query`, or `category`; used by `timeline`
-- `--top`: non-negative integer; `0` prints all selected rows or columns
-- `--sort-by`: query/client ranking key: `total-duration`, `count`, `p95`, `max`, or `docs-examined`
-- `--include-internal`: include internal commands in main query ranking; internal activity is summarized separately by `analysis`
-- `--fill-gaps`: emit zero-slow-operation timeline buckets in `analysis`
-- `--max-buckets`: reject `analysis` output that would exceed this bucket count
-- `--verbose`: print per-file failures to stderr when input is partial or failed
+### Flag rules
 
-Validation rules:
-- at least one input path is required
-- `--bucket` must be a positive duration
-- `--top` must be `0` or greater when supplied
-- `--max-buckets` must be positive
-- `--from` and `--to` must be valid RFC3339 timestamps
-- if both are provided, `--from` must be less than or equal to `--to`
+- `--report` is required. `analysis` is always JSON.
+- `--top`: default 20 for `queries`, query timelines and `analysis`; all for
+  `clients` and `messages`; `0` means all. `events` ignores it.
+- `--group-by` and `--bucket` are for `timeline` (`--bucket` also sets the
+  `analysis` timeline). `--group-by node` gives one column per mongod/mongos.
+- `--sort-by` ranks `queries`, `clients` (default `count`) and `analysis`.
+- Exit 0 for a report (also when nothing matched), 1 when no input file could
+  be read, 2 for usage errors.
 
-Exit behavior:
-- exit code `0` for successful reports, including valid no-match reports
-- exit code `1` when no input file can be read successfully
-- exit code `2` for CLI usage or validation errors
+## Picking a report
 
-## Report Selection
+| Question | Command |
+|---|---|
+| What is in this case folder, which nodes, versions, time ranges | any report: read the header (`Nodes` table) |
+| What happened and when: restarts, shutdowns, signals, unclean shutdown, fatal, state changes, elections, sync source, reconfig, initial sync, FCV | `--report events` |
+| Which warnings / errors / fatals were logged, how often, where | `--report messages` |
+| When were operations slow, on which node | `--report timeline --group-by node --bucket 15m` |
+| Which kinds of operations were slow over time | `--report timeline --group-by optype` (or `namespace`, `query`, `category`) |
+| Which query shapes cost the most | `--report queries --top 20` |
+| Which user / client IP / application sent the slow operations | `--report clients` |
+| Evidence for one window: shapes, plans, scan ratios, indicators, hot windows | `--report analysis --from ... --to ...` |
+| Exact values, filtering, counting | `--json` piped through `jq` (see references) |
 
-Choose `timeline` when the user wants time-based spikes or changes.
-Common flags:
-- `--bucket 30m` for 30-minute grouping
-- `--group-by optype` for normalized operation columns such as `find`, `update`, `delete`, `getMore`, `internal`, `other`
-- `--group-by namespace` for namespace columns
-- `--group-by query` for query-shape columns
-- `--group-by category` for `read`, `write`, `cursor`, `transaction`, `command`, `internal`, `other`
-- `--top N` only when the user wants to cap columns; omit it for all optype/namespace/category groups
+### Working order when you run it yourself
 
-Choose `queries` when the user wants ranked slow query shapes and per-shape latency.
-Common flags:
-- `--top N` to limit rows; default is `20`
-- `--top 0` to print every shape
-- `--sort-by total-duration` to rank by cumulative slow duration
-- `--sort-by count`, `p95`, `max`, or `docs-examined` for alternate rankings
+Point it at the whole case folder once you know it contains this case's logs.
+Large logs take time (roughly 25 s per GB of plain log and 3-4 min per GB
+of gzip, per report), so run reports in the background for multi-GB inputs, and narrow
+with `--from/--to` once you know the window.
 
-Choose `clients` when the user wants slow operations correlated to MongoDB connection, client metadata, and authenticated users.
-Common flags:
-- `--top N` to limit user/client groups; omit it for all correlated groups
-- `--sort-by count` to rank by slow-operation count
-- `--sort-by total-duration`, `p95`, `max`, or `docs-examined` for alternate rankings
+1. **`events`** (text). Small: one line per event. It gives the nodes, the
+   versions, restarts and replica-set changes, and the times to look at.
+2. **`messages`** (text). One line per distinct warning/error, with count,
+   first/last, and nodes. Read the `E` and `F` rows first, then `W` rows whose
+   first/last bracket the incident.
+3. **`timeline --group-by node`** with a bucket that fits the range (`15m` for
+   a day, `1m` for an hour) to see when and where slow operations happened.
+4. **`queries`** or **`analysis`** for the window you found (`--from/--to`).
+   `analysis` is JSON for reading with `jq`; do not read it whole.
+5. **`clients`** when the question is who sent the load.
 
-Choose `analysis` when the user wants compact AI-ready JSON without raw logs.
-Common flags:
-- `--bucket 30m` for FTDC correlation windows
-- `--top 20` for bounded query shapes and namespaces
-- `--sort-by total-duration` for impact-first ranking
-- `--include-internal` only if internal commands should be in main query ranking
-- `--max-buckets N` if the requested range is very large
-
-## Default Commands
-
-Use these commands when the user asks how to run each report type to an output file with default parameters:
+Text is the cheapest to read for 1-3. Use `--json` with `jq` for questions
+like "how many times", "which node first", or "between which events":
 
 ```bash
-./mongodb-logstat --report timeline /path/to/mongod.log > timeline_report.txt
-./mongodb-logstat --report queries /path/to/mongod.log > queries_report.txt
-./mongodb-logstat --report clients /path/to/mongod.log > clients_report.txt
-./mongodb-logstat --report analysis /path/to/mongod.log > analysis_report.json
+L="mongodb-logstat --json"
+# events of one kind, per node, in order
+$L --report events DIR | jq -r '.events[] | select(.kind=="rsState") | [.time,.node,.detail] | @tsv'
+# warnings/errors that started inside a window
+$L --report messages DIR | jq -r '.messages[] | select(.first >= "2026-11-04T13:00" and .first < "2026-11-04T14:00") | [.severity,.logId,.count,.msg] | @tsv'
+# top shapes in the hottest analysis window, by name
+$L --report analysis --from 2026-11-04T13:00 --to 2026-11-04T15:00 DIR | jq -r '.hotWindows[0].dominantShapes[] | [.label,.cumulativeDurationMs,.durationSharePct] | @tsv'
 ```
 
-JSON v1 reports:
+More recipes and every JSON field are in [references/json.md](references/json.md).
 
-```bash
-./mongodb-logstat --report timeline --json /path/to/mongod.log > timeline_report.json
-./mongodb-logstat --report queries --json /path/to/mongod.log > queries_report.json
-./mongodb-logstat --report clients --json /path/to/mongod.log > clients_report.json
+## Reading output
+
+- **Header first.** `Input files`, `Skipped files`, `Duplicate lines`, the
+  `Nodes` table (node `host:port`, process, replica set, role, version,
+  files, log range, slow ops), the input log range, and the slow-op counters.
+  `Input status: partial` means some files failed; `--verbose` lists why.
+- **Nodes** come from startup and log-rotation lines (`MongoDB starting`,
+  `Process Details`, options, Build Info). A mongos log that begins at
+  process start has no host line and is named by its file.
+- **Slow operations are only what was logged**: operations above
+  `slowms` (and sampled by `slowOpSampleRate`). Counts are not total
+  workload, and cumulative duration overlaps across concurrent operations: it
+  is not server utilization.
+- **Operations**: normalized to `find`, `aggregate`, `insert`, `update`,
+  `delete`, `getMore`, `command` (admin/DDL/index/sharding/user commands),
+  `internal` (replication, heartbeats, hello/isMaster), and `other`.
+  Internal operations are excluded from `queries` ranking unless
+  `--include-internal`.
+- **Query labels** are `operation:namespace#short-shape-id`.
+  `sample_line`/`sampleLine` (`file:line`) points to the worst sample, so you
+  can read the raw line with `sed -n '<line>p' <file>` (unzip `.gz` first).
+- **clients**: operations are tied to users by exact connection (`ctx`), never
+  by IP. `uncorrelated_slow_ops` are operations whose connection was opened
+  before the log starts; on shards behind mongos that is often most of them.
+- **events** state facts only, no verdicts. `rsState` is this node's own
+  transition; `memberState` is another member as seen by this node.
+- **messages** group by severity, component, log id, and message text, so the
+  same id with different text are separate rows.
+
+## Diagnostic patterns
+
+Facts first, then a cause, with evidence from at least two sources:
+
+- **Restart / crash:** a clean stop is `signal` (15, SIGTERM: something
+  asked it to stop) then `shutdown exitCode 0`. A `start` followed by
+  `uncleanShutdown` with no `shutdown` before it means the process died
+  without logging: SIGKILL (often the kernel OOM killer), a crash, or a host
+  reset. mongod cannot log SIGKILL. Check `messages` `F` rows, the last lines
+  before the gap, and the host's kernel log for OOM.
+- **Primary change:** `electionStart` / `electionWon` / `rsState` on the new
+  primary, `rsState PRIMARY -> SECONDARY` on the old one, `memberState ...
+  DOWN` on others. Line the times up across nodes with `events`.
+- **Replication trouble on a secondary:** many `syncSource` changes,
+  `messages` W `REPL` 21122 "Oplog fetcher stopped querying remote oplog with
+  error" (read its sample `error`), `memberState` flips. Then FTDC
+  (`mongodb-ftdcstat --view repl --verbose`) for lag and fetch rates.
+- **Network / TLS:** `messages` W `NETWORK` 23234/23235 (certificates),
+  4615610 "Failed to check socket connectivity", 23019 slow DNS.
+- **Query timeouts / errors:** `messages` W `QUERY` 23798 "Plan executor
+  error during find" (sample shows `MaxTimeMSExpired` and the plan stage, for
+  example `COLLSCAN` with docsExamined), 20478 getMore errors. Then `queries`
+  for that namespace and window.
+- **Write stalls:** `messages` W `STORAGE` 22225 "Flow control is engaged",
+  W `COMMAND` 20471 "instance is locked" (fsync lock, often backups).
+- **Expensive queries:** `queries` by `total-duration`, then `analysis` for
+  the window: `planEvidence`, `ratios` (docs examined per returned),
+  `indicators` (`collection_scan_observed`, `high_scan_amplification_observed`,
+  `disk_spill_observed`, `replanned_observed`).
+
+## Answer format
+
+```text
+input: <nodes, versions, files, log range; skipped/duplicates/partial if any>
+observations: <events/messages/slow-op facts with times and nodes>
+interpretation: <likely cause, with confidence>
+next checks: <exact mongodb-logstat or mongodb-ftdcstat command(s), or data to ask for>
 ```
 
-Capture stderr separately when needed because partial-input details go to stderr:
+Say what is missing (FTDC, other nodes' logs, the time zone the customer
+used, `slowms`) instead of guessing. Logs show what happened and which
+operations were slow; FTDC shows resource pressure. Correlate the windows:
+`analysis` `hotWindows` and `timeline` buckets line up with
+`mongodb-ftdcstat --from/--to`.
 
-```bash
-./mongodb-logstat --report timeline --verbose /path/to/mongod.log > timeline_report.txt 2> timeline_errors.txt
-```
+## Changing the tool
 
-## Common Command Patterns
-
-```bash
-./mongodb-logstat --report timeline --bucket 30m --group-by optype /path/to/mongod.log
-./mongodb-logstat --report timeline --bucket 30m --group-by query --top 10 /path/to/mongod.log
-./mongodb-logstat --report queries --top 10 --sort-by total-duration /path/to/mongod.log
-./mongodb-logstat --report queries --top 0 --sort-by count /path/to/mongod.log
-./mongodb-logstat --report clients --top 20 --sort-by count /path/to/mongod.log
-./mongodb-logstat --report analysis --bucket 30m --top 20 /path/to/mongod.log > mongodb-analysis.json
-./mongodb-logstat --report analysis --from 2026-07-14T21:00:00Z --to 2026-07-14T23:00:00Z /path/to/mongod.log > mongodb-analysis.json
-```
-
-## Output Semantics
-
-Keep these behaviors in mind when explaining results:
-- `timeline`, `queries`, `clients`, and `analysis` use normalized operations; raw internal command names such as `configTerm` do not appear as normal workload operations.
-- `timeline` and `queries` are two-pass; `analysis` emits schema-version-2 JSON.
-- Query identity precedence is `queryShapeHash`, `planCacheShapeHash`, `queryHash`, then local deterministic privacy-safe canonical hash.
-- `planCacheKey` is plan-variant evidence, not query identity.
-- Query labels are `operation:namespace#short-shape-id`; they never render `#null`.
-- Associated `getMore` latency contributes to the originating query shape when `originatingCommand` is available, but operation timelines still count it as `getMore`.
-- `queries.sampleLine` or terminal `sample_line` points to the worst-duration sample for that row.
-- Oversized logical lines above `16 MiB` are skipped and counted as malformed.
-- If some inputs fail but at least one succeeds, the tool reports partial input.
-- Counts and rates represent logged slow operations only; they may be sampled and do not prove total workload. Analysis rates include the explicit denominator under `global.rates.overAnalysisRange`.
-- Cumulative duration can overlap across concurrent operations and is not server utilization.
-
-## Analysis JSON Contents
-
-The `analysis` report includes:
-- `schemaVersion: 2` and `report: analysis`
-- `semantics` with slow-log limitations and privacy guarantees
-- `ranges` for requested, input-observed, and slow-operation-observed time spans
-- `diagnostics` for input status, malformed lines, filtered records, canonicalization fallback, and unassociated `getMore`
-- `global` latency, bounded counts, cumulative duration, structured indicators, and denominator-qualified rates
-- `timeline` filled buckets by default
-- `hotWindows` for FTDC correlation
-- `queryShapes` with globally unique `shapeKey` values, redacted shape, observed operations, cursor counts, impact, optional metrics, `planEvidence`, ratios, indicators, and worst sample reference
-- `namespaces`, `internalOperations`, `omitted`, and `indicatorThresholds`
-
-Redaction preserves field paths/operators/stages/sort structure and replaces values with type markers such as `?string`, `?number`, and `?date`. Do not claim values are available from `analysis`.
-
-## Interpretation Hints
-
-Use these shortcuts when helping a user read reports:
-- In `timeline`, columns after `start` and `total` are selected group values for `--group-by`.
-- In `queries`, `plan` is the dominant rendered plan summary for that shape.
-- In `queries`, `avg_ms`, `p95_ms`, and `max_ms` are milliseconds.
-- In `analysis.queryShapes[].impact`, `totalDurationMs` ranks cumulative logged slow-operation impact.
-- In `analysis.queryShapes[].execution`, metric averages only include records where the metric was present; missing metrics are not coerced to zero.
-- For suspected resource pressure, use `analysis.hotWindows` as time windows to correlate with FTDC; do not infer CPU, disk, memory, or replica health from slow logs alone.
-
-## Working Pattern
-
-When asked to analyze a log or explain how to run the tool:
-1. Pick `timeline` for time windows, `queries` for top shapes, or `analysis` for AI-ready evidence.
-2. Prefer default commands unless the user asked for filters, JSON, or specific bucket/top values.
-3. Use shell redirection when the user wants an output file.
-4. Quote the exact command used when asked how a report was produced.
-5. Use `sample_line` to point back to a raw log sample when the user asks about a specific query row.
-6. Answer CLI usage questions from this skill content rather than invoking `--help` unless validating a changed binary.
+Single Go package at the repo root: `cli.go` (flags), `logformat.go` (format
+detection, gzip, prefixes), `input.go` (directory walk), `parser.go` (line
+parsing, slow-op normalization, copy detection), `nodes.go` (node identity),
+`events.go`, `messages.go`, `clients.go`, `report.go` (timeline, queries,
+analysis, header). Log ids are matched before message text. If you change a
+report, flag, or JSON field, update `README.md` (`readme_test.go` checks the
+usage line, report sections, flags and event kinds), this skill and its
+`references/json.md`, the Codex skill in `.codex/skills/mongodb-logstat-skill`,
+and the tests. Validate with `go vet ./...` and `go test ./...`, then run the
+changed report on real logs from more than one version and compare with the
+previous build.

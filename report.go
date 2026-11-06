@@ -1287,6 +1287,7 @@ type AnalysisBucket struct {
 	LatencyP95Ms         *int64         `json:"latencyP95Ms"`
 	Operations           map[string]int `json:"operations"`
 	DominantShapeKeys    []string       `json:"dominantShapeKeys"`
+	shapeDuration        map[string]int64
 }
 
 func (b AnalysisBucket) MarshalJSON() ([]byte, error) {
@@ -1319,18 +1320,35 @@ type AnalysisHotWindow struct {
 	LatencyP95Ms         *int64         `json:"latencyP95Ms"`
 	DominantOperations   map[string]int `json:"dominantOperations"`
 	DominantShapeKeys    []string       `json:"dominantShapeKeys"`
+	DominantShapes       []AnalysisHotWindowShape
+	shapeDuration        map[string]int64
+}
+
+// AnalysisHotWindowShape names a dominant shape of a hot window so a reader
+// does not have to look up each shapeKey in queryShapes.
+type AnalysisHotWindowShape struct {
+	ShapeKey   string  `json:"shapeKey"`
+	Label      string  `json:"label"`
+	DurationMs int64   `json:"cumulativeDurationMs"`
+	SharePct   float64 `json:"durationSharePct"`
 }
 
 func (w AnalysisHotWindow) MarshalJSON() ([]byte, error) {
+	shapes := w.DominantShapes
+	if shapes == nil {
+		shapes = []AnalysisHotWindowShape{}
+	}
 	return json.Marshal(struct {
-		Start                string         `json:"start"`
-		End                  string         `json:"end"`
-		LoggedSlowOperations int            `json:"loggedSlowOperations"`
-		CumulativeDurationMs int64          `json:"cumulativeDurationMs"`
-		LatencyP95Ms         *int64         `json:"latencyP95Ms"`
-		DominantOperations   map[string]int `json:"dominantOperations"`
-		DominantShapeKeys    []string       `json:"dominantShapeKeys"`
+		Start                string                   `json:"start"`
+		End                  string                   `json:"end"`
+		LoggedSlowOperations int                      `json:"loggedSlowOperations"`
+		CumulativeDurationMs int64                    `json:"cumulativeDurationMs"`
+		LatencyP95Ms         *int64                   `json:"latencyP95Ms"`
+		DominantOperations   map[string]int           `json:"dominantOperations"`
+		DominantShapeKeys    []string                 `json:"dominantShapeKeys"`
+		DominantShapes       []AnalysisHotWindowShape `json:"dominantShapes"`
 	}{
+		DominantShapes:       shapes,
 		Start:                formatJSONTime(w.Start),
 		End:                  formatJSONTime(w.End),
 		LoggedSlowOperations: w.LoggedSlowOperations,
@@ -1606,6 +1624,7 @@ func computeAnalysis(files []string, discoveryFailures []FileFailure, cfg Config
 		},
 		IndicatorThresholds: map[string]any{"highScanAmplificationRatio": 100, "highScanAmplificationMinDocsExamined": 1000},
 	}
+	labelHotWindowShapes(report.HotWindows, report.QueryShapes)
 	if err := validateAnalysisReport(report, selectedSet); err != nil {
 		return AnalysisReport{}, err
 	}
@@ -1731,6 +1750,7 @@ func analysisTimeline(cfg Config, buckets map[int64]*analysisBucketAgg, valid ma
 				row.Operations[op] = count
 			}
 			row.DominantShapeKeys = topShapeKeys(agg.shapeDuration, 5, emitted)
+			row.shapeDuration = agg.shapeDuration
 		}
 		rows = append(rows, row)
 	}
@@ -1774,6 +1794,23 @@ func operationZeroMap() map[string]int {
 	return map[string]int{"find": 0, "aggregate": 0, "count": 0, "distinct": 0, "insert": 0, "update": 0, "delete": 0, "findAndModify": 0, "bulkWrite": 0, "getMore": 0, "command": 0, "internal": 0, "other": 0}
 }
 
+// labelHotWindowShapes fills each hot window's dominantShapes from its
+// dominantShapeKeys and the emitted query shapes.
+func labelHotWindowShapes(windows []AnalysisHotWindow, shapes []AnalysisQueryShape) {
+	labels := make(map[string]string, len(shapes))
+	for _, shape := range shapes {
+		labels[shape.ShapeKey] = shape.Label
+	}
+	for i := range windows {
+		w := &windows[i]
+		w.DominantShapes = make([]AnalysisHotWindowShape, 0, len(w.DominantShapeKeys))
+		for _, key := range w.DominantShapeKeys {
+			ms := w.shapeDuration[key]
+			w.DominantShapes = append(w.DominantShapes, AnalysisHotWindowShape{ShapeKey: key, Label: labels[key], DurationMs: ms, SharePct: math.Round(percentOf(ms, w.CumulativeDurationMs)*10) / 10})
+		}
+	}
+}
+
 func hotWindows(timeline []AnalysisBucket) []AnalysisHotWindow {
 	items := append([]AnalysisBucket(nil), timeline...)
 	sort.Slice(items, func(i, j int) bool {
@@ -1793,7 +1830,7 @@ func hotWindows(timeline []AnalysisBucket) []AnalysisHotWindow {
 		if item.LoggedSlowOperations == 0 {
 			continue
 		}
-		out = append(out, AnalysisHotWindow{Start: item.Start, End: item.End, LoggedSlowOperations: item.LoggedSlowOperations, CumulativeDurationMs: item.CumulativeDurationMs, LatencyP95Ms: item.LatencyP95Ms, DominantOperations: item.Operations, DominantShapeKeys: item.DominantShapeKeys})
+		out = append(out, AnalysisHotWindow{Start: item.Start, End: item.End, LoggedSlowOperations: item.LoggedSlowOperations, CumulativeDurationMs: item.CumulativeDurationMs, LatencyP95Ms: item.LatencyP95Ms, DominantOperations: item.Operations, DominantShapeKeys: item.DominantShapeKeys, shapeDuration: item.shapeDuration})
 	}
 	return out
 }
