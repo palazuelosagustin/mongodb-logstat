@@ -578,7 +578,7 @@ func TestClientsTerminalGroupingAndColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Clients report (ranking count, top all, displayed_groups 3, omitted_groups 0, omitted_slow_ops 1)", "appUser@admin", "batch@reporting", "CLIENT_IP", "TOTAL"} {
+	for _, want := range []string{"Clients report (ranking count, top all, displayed_groups 3, omitted_groups 0, omitted_slow_ops 0, uncorrelated_slow_ops 1)", "Uncorrelated: 1 of ", "appUser@admin", "batch@reporting", "CLIENT_IP", "TOTAL"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("terminal output missing %q:\n%s", want, out)
 		}

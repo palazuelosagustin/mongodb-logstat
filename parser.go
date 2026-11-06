@@ -510,6 +510,20 @@ func statementCommandName(typeName string) string {
 	}
 }
 
+// commandOptionKeys are generic command options. The log's command document
+// is decoded into a map, so field order (the command name comes first) is
+// lost; these keys must not be mistaken for the command name.
+var commandOptionKeys = map[string]bool{
+	"maxTimeMS": true, "maxTimeMSOpOnly": true, "readConcern": true, "writeConcern": true,
+	"readPreference": true, "apiVersion": true, "apiStrict": true, "apiDeprecationErrors": true,
+	"clientOperationKey": true, "mayBypassWriteBlocking": true, "autocommit": true,
+	"startTransaction": true, "stmtId": true, "stmtIds": true, "ordered": true,
+	"bypassDocumentValidation": true, "let": true, "hint": true, "collation": true,
+	"allowDiskUse": true, "batchSize": true, "singleBatch": true, "limit": true, "skip": true,
+	"nameOnly": true, "authorizedDatabases": true, "term": true, "optimes": true,
+	"shardVersion": true, "databaseVersion": true, "allowImplicitCollectionCreation": true,
+}
+
 func deriveCommandName(command map[string]any) string {
 	if command == nil {
 		return ""
@@ -521,6 +535,8 @@ func deriveCommandName(command map[string]any) string {
 		"createIndexes", "dropIndexes", "collMod", "renameCollection", "validate", "compact", "explain",
 		"killCursors", "killOp", "endSessions", "ping", "top", "serverStatus", "currentOp", "buildInfo",
 		"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus",
+		"addShard", "removeShard", "enableSharding", "movePrimary", "refineCollectionShardKey", "listShards",
+		"balancerStart", "balancerStop", "features",
 		"saslStart", "saslContinue", "authenticate", "hello", "isMaster", "replSetHeartbeat", "configTerm",
 	} {
 		if _, ok := command[key]; ok {
@@ -535,6 +551,9 @@ func deriveCommandName(command map[string]any) string {
 		}
 		switch k {
 		case "filter", "sort", "projection", "pipeline", "updates", "deletes", "documents", "cursor", "collection", "mechanism", "comment", "lsid", "txnNumber":
+			continue
+		}
+		if commandOptionKeys[k] {
 			continue
 		}
 		keys = append(keys, k)
@@ -568,7 +587,9 @@ func normalizeOperation(commandName string, command, originatingCommand map[stri
 	case "dbStats", "collStats", "listCollections", "listIndexes", "listDatabases", "dropDatabase", "create", "drop",
 		"createIndexes", "dropIndexes", "collMod", "renameCollection", "validate", "compact", "explain",
 		"killCursors", "killOp", "endSessions", "ping", "top", "serverStatus", "currentOp", "buildInfo",
-		"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus":
+		"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus",
+		"addShard", "removeShard", "enableSharding", "movePrimary", "refineCollectionShardKey", "listShards",
+		"balancerStart", "balancerStop", "features":
 		return OperationInfo{Category: "command", Operation: "command"}
 	case "command":
 		if command != nil {

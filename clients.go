@@ -224,7 +224,11 @@ func renderClients(cfg Config, report ClientsReport) (string, int, error) {
 	var buf bytes.Buffer
 	writeInputStatus(&buf, cfg, report.Stats)
 	writeTerminalMetadata(&buf, cfg, report.Stats, report.Observed, report.Accepted)
-	buf.WriteString(fmt.Sprintf("Clients report (ranking %s, top %s, displayed_groups %d, omitted_groups %d, omitted_slow_ops %d)\n", report.Ranking, topLabel(report.TopLimit), report.DisplayedGroups, report.OmittedGroups, report.OmittedSlowOps+report.UncorrelatedSlowOperations))
+	buf.WriteString(fmt.Sprintf("Clients report (ranking %s, top %s, displayed_groups %d, omitted_groups %d, omitted_slow_ops %d, uncorrelated_slow_ops %d)\n", report.Ranking, topLabel(report.TopLimit), report.DisplayedGroups, report.OmittedGroups, report.OmittedSlowOps, report.UncorrelatedSlowOperations))
+	if report.UncorrelatedSlowOperations > 0 && report.Accepted > 0 {
+		buf.WriteString(fmt.Sprintf("Uncorrelated: %d of %d slow ops (%.1f%%) ran on connections with no connection or authentication line in the input, usually connections opened before the log starts (pooled mongos or driver connections).\n",
+			report.UncorrelatedSlowOperations, report.Accepted, 100*float64(report.UncorrelatedSlowOperations)/float64(report.Accepted)))
+	}
 	if len(report.Rows) == 0 {
 		buf.WriteString("No matching records.\n")
 		return buf.String(), 0, nil

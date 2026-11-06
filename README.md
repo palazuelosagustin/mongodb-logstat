@@ -71,7 +71,7 @@ Rows include `label`, `count`, `avg_ms`, `p95_ms`, `max_ms`, dominant `plan`, an
 
 ### `clients`
 
-Terminal or JSON report that correlates accepted logged slow operations to MongoDB connection, client metadata, and authentication events (matched by log id, including the 5.0+ `Successfully authenticated` message) by exact log context such as `ctx:"conn188052"`. It never attributes by client IP alone. Slow operations without matching in-range connection metadata are counted as uncorrelated.
+Terminal or JSON report that correlates accepted logged slow operations to MongoDB connection, client metadata, and authentication events (matched by log id, including the 5.0+ `Successfully authenticated` message) by exact log context such as `ctx:"conn188052"`. It never attributes by client IP alone. Slow operations without matching in-range connection metadata are counted as uncorrelated; the terminal header shows `uncorrelated_slow_ops` separately from `omitted_slow_ops` (groups cut by `--top`) and states their share. On shards behind mongos most slow operations often run on pooled connections opened before the log starts, so a large uncorrelated share is expected there.
 
 ```bash
 ./mongodb-logstat --report clients /path/to/mongod.log

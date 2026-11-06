@@ -473,3 +473,23 @@ func TestPodLogsWithSameShellPreambleAreNotCopies(t *testing.T) {
 		t.Fatalf("accepted=%d duplicates=%d want 4 and 0", report.Accepted, report.Stats.Diagnostics.DuplicateLinesSkipped)
 	}
 }
+
+func TestCommandNameIgnoresOptionKeys(t *testing.T) {
+	cases := map[string]map[string]any{
+		"replSetUpdatePosition": {"replSetUpdatePosition": 1, "optimes": []any{}, "maxTimeMSOpOnly": 30000, "$db": "admin"},
+		"addShard":              {"addShard": "rs01/host:27017", "lsid": map[string]any{}, "$db": "admin"},
+		"features":              {"features": 1, "maxTimeMS": 30000, "maxTimeMSOpOnly": 1000, "$db": "admin"},
+	}
+	for want, command := range cases {
+		if got := deriveCommandName(command); got != want {
+			t.Fatalf("deriveCommandName(%v)=%q want %q", command, got, want)
+		}
+	}
+	stats := &PassStats{}
+	if info := normalizeOperation("replSetUpdatePosition", nil, nil, nil, stats); info.Operation != "internal" {
+		t.Fatalf("replSetUpdatePosition operation=%q want internal", info.Operation)
+	}
+	if info := normalizeOperation("addShard", nil, nil, nil, stats); info.Operation != "command" {
+		t.Fatalf("addShard operation=%q want command", info.Operation)
+	}
+}
