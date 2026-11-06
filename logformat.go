@@ -141,26 +141,38 @@ func detectLogFormat(head []byte) logFormat {
 	}
 }
 
-// maxLinePrefix bounds the prefix that may precede a structured log line,
-// such as the RFC3339Nano timestamp added by "kubectl logs --timestamps" or
-// "docker logs -t".
-const maxLinePrefix = 48
+// maxLinePrefix bounds the prefix that may precede a structured log line:
+// the RFC3339Nano timestamp added by "kubectl logs --timestamps" or
+// "docker logs -t", or a syslog/journald header such as
+// "Nov 02 10:13:11 host mongod[2619]: ".
+const maxLinePrefix = 256
+
+var syslogDocStart = []byte(` {"t":{"$date"`)
 
 // structuredStart returns the offset where the structured log document starts
-// in line, or -1 when the line is not a structured log line. One leading
-// token that starts with a digit (a timestamp) followed by a space is allowed.
+// in line, or -1 when the line is not a structured log line.
 func structuredStart(line []byte) int {
 	if len(line) > 1 && line[0] == '{' && line[1] == '"' {
 		return 0
 	}
-	if len(line) == 0 || line[0] < '0' || line[0] > '9' {
+	if len(line) == 0 {
 		return -1
 	}
-	sp := bytes.IndexByte(line, ' ')
-	if sp <= 0 || sp > maxLinePrefix || sp+2 >= len(line) || line[sp+1] != '{' || line[sp+2] != '"' {
-		return -1
+	// One leading token that starts with a digit (a timestamp), then a space.
+	if line[0] >= '0' && line[0] <= '9' {
+		if sp := bytes.IndexByte(line, ' '); sp > 0 && sp <= maxLinePrefix && sp+2 < len(line) && line[sp+1] == '{' && line[sp+2] == '"' {
+			return sp + 1
+		}
 	}
-	return sp + 1
+	// Any prefix (syslog, journald) followed by a MongoDB log document.
+	window := line
+	if len(window) > maxLinePrefix+len(syslogDocStart) {
+		window = window[:maxLinePrefix+len(syslogDocStart)]
+	}
+	if i := bytes.Index(window, syslogDocStart); i >= 0 {
+		return i + 1
+	}
+	return -1
 }
 
 var logTimestampField = []byte(`"t":{"$date"`)

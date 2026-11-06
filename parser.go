@@ -524,23 +524,44 @@ var commandOptionKeys = map[string]bool{
 	"shardVersion": true, "databaseVersion": true, "allowImplicitCollectionCreation": true,
 }
 
+// knownCommandNames are matched before any other key of a command document,
+// in this order. Field order is lost when the document is decoded, so a
+// known name must win over option keys.
+var knownCommandNames = []string{
+	"find", "count", "distinct", "delete", "findAndModify", "update", "insert",
+	"aggregate", "bulkWrite", "getMore", "commitTransaction", "abortTransaction",
+	"dbStats", "collStats", "listCollections", "listIndexes", "listDatabases", "dropDatabase", "create", "drop",
+	"createIndexes", "dropIndexes", "collMod", "renameCollection", "validate", "compact", "explain",
+	"killCursors", "killOp", "endSessions", "ping", "top", "serverStatus", "currentOp", "buildInfo",
+	"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus",
+	"addShard", "removeShard", "enableSharding", "movePrimary", "refineCollectionShardKey", "listShards",
+	"balancerStart", "balancerStop", "features", "fsync", "fsyncUnlock",
+	"usersInfo", "rolesInfo", "createUser", "updateUser", "dropUser", "grantRolesToUser", "revokeRolesFromUser",
+	"saslStart", "saslContinue", "authenticate", "hello", "isMaster", "replSetHeartbeat", "configTerm",
+	"replSetGetStatus", "replSetUpdatePosition", "replSetGetConfig", "replSetReconfig", "replSetStepDown",
+}
+
+var knownCommandNamesLower = func() map[string]string {
+	m := make(map[string]string, len(knownCommandNames))
+	for _, name := range knownCommandNames {
+		m[strings.ToLower(name)] = name
+	}
+	return m
+}()
+
 func deriveCommandName(command map[string]any) string {
 	if command == nil {
 		return ""
 	}
-	for _, key := range []string{
-		"find", "count", "distinct", "delete", "findAndModify", "update", "insert",
-		"aggregate", "bulkWrite", "getMore", "commitTransaction", "abortTransaction",
-		"dbStats", "collStats", "listCollections", "listIndexes", "listDatabases", "dropDatabase", "create", "drop",
-		"createIndexes", "dropIndexes", "collMod", "renameCollection", "validate", "compact", "explain",
-		"killCursors", "killOp", "endSessions", "ping", "top", "serverStatus", "currentOp", "buildInfo",
-		"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus",
-		"addShard", "removeShard", "enableSharding", "movePrimary", "refineCollectionShardKey", "listShards",
-		"balancerStart", "balancerStop", "features",
-		"saslStart", "saslContinue", "authenticate", "hello", "isMaster", "replSetHeartbeat", "configTerm",
-	} {
+	for _, key := range knownCommandNames {
 		if _, ok := command[key]; ok {
 			return key
+		}
+	}
+	// Older drivers and tools send lowercase names (ismaster, buildinfo).
+	for key := range command {
+		if name, ok := knownCommandNamesLower[strings.ToLower(key)]; ok {
+			return name
 		}
 	}
 
@@ -589,7 +610,8 @@ func normalizeOperation(commandName string, command, originatingCommand map[stri
 		"killCursors", "killOp", "endSessions", "ping", "top", "serverStatus", "currentOp", "buildInfo",
 		"getParameter", "setParameter", "shardCollection", "reshardCollection", "moveChunk", "split", "balancerStatus",
 		"addShard", "removeShard", "enableSharding", "movePrimary", "refineCollectionShardKey", "listShards",
-		"balancerStart", "balancerStop", "features":
+		"balancerStart", "balancerStop", "features", "fsync", "fsyncUnlock",
+		"usersInfo", "rolesInfo", "createUser", "updateUser", "dropUser", "grantRolesToUser", "revokeRolesFromUser":
 		return OperationInfo{Category: "command", Operation: "command"}
 	case "command":
 		if command != nil {
@@ -615,6 +637,8 @@ func canonicalCommandName(name string) string {
 	switch strings.ToLower(name) {
 	case "findandmodify", "find_and_modify":
 		return "findAndModify"
+	case "ismaster":
+		return "isMaster"
 	default:
 		return name
 	}

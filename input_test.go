@@ -479,6 +479,11 @@ func TestCommandNameIgnoresOptionKeys(t *testing.T) {
 		"replSetUpdatePosition": {"replSetUpdatePosition": 1, "optimes": []any{}, "maxTimeMSOpOnly": 30000, "$db": "admin"},
 		"addShard":              {"addShard": "rs01/host:27017", "lsid": map[string]any{}, "$db": "admin"},
 		"features":              {"features": 1, "maxTimeMS": 30000, "maxTimeMSOpOnly": 1000, "$db": "admin"},
+		"isMaster":              {"ismaster": 1, "client": map[string]any{}, "$db": "admin"},
+		"buildInfo":             {"buildinfo": 1, "$db": "admin"},
+		"replSetGetStatus":      {"replSetGetStatus": 1, "forShell": 1, "initialSync": 0, "$db": "admin"},
+		"fsync":                 {"fsync": 1, "lock": true, "$db": "admin"},
+		"usersInfo":             {"usersInfo": 1, "showPrivileges": true, "showCredentials": false, "$db": "admin"},
 	}
 	for want, command := range cases {
 		if got := deriveCommandName(command); got != want {
@@ -491,5 +496,21 @@ func TestCommandNameIgnoresOptionKeys(t *testing.T) {
 	}
 	if info := normalizeOperation("addShard", nil, nil, nil, stats); info.Operation != "command" {
 		t.Fatalf("addShard operation=%q want command", info.Operation)
+	}
+}
+
+func TestSyslogPrefixedLogs(t *testing.T) {
+	dir := t.TempDir()
+	doc := `{"t":{"$date":"2026-11-02T10:13:30.264+00:00"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn1","msg":"Slow query","attr":{"type":"command","ns":"shop.orders","command":{"find":"orders","$db":"shop"},"durationMillis":150}}`
+	content := "Nov 02 10:13:30 db-host-1 mongo[2619]: " + doc + "\n" +
+		"Nov 02 10:13:31 db-host-1 systemd[1]: Started something.\n"
+	path := filepath.Join(dir, "mongo_log_36h.log")
+	writeFile(t, path, []byte(content))
+	if f, _ := sniffLogFile(path); f != formatJSON {
+		t.Fatalf("format=%v want JSON", f)
+	}
+	report := computeTimeline([]string{path}, nil, Config{Report: "timeline", Top: -1, Bucket: time.Hour, GroupBy: "optype"})
+	if report.Accepted != 1 || report.Stats.Diagnostics.LinesMalformed != 1 {
+		t.Fatalf("accepted=%d malformed=%d want 1 and 1", report.Accepted, report.Stats.Diagnostics.LinesMalformed)
 	}
 }
