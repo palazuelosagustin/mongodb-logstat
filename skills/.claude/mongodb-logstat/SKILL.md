@@ -1,6 +1,6 @@
 ---
 name: mongodb-logstat
-description: Run and interpret mongodb-logstat, a Go CLI that reads MongoDB / Percona Server for MongoDB structured JSON logs (5.0 and later, mongod and mongos, plain, gzip, syslog/journald or Kubernetes pod logs, one file or a whole cluster dump) and reports process and replica-set events, grouped warnings and errors, slow-operation timelines, ranked query shapes, slow operations per client/user, and redacted AI-ready analysis JSON. Use when the user has mongod/mongos logs for a support case and wants to know what happened and when, which node restarted, stepped down or lost its sync source, which warnings or errors were logged, which queries were slow, which client sent them, or which mongodb-logstat report or flags to use; also when they paste mongodb-logstat output to explain, or when changing mongodb-logstat code or docs. Not for FTDC diagnostic.data (use mongodb-ftdcstat) or for sanitizing customer data (use mongodb-log-obfuscator-go).
+description: Run and interpret mongodb-logstat, a Go CLI that reads MongoDB / Percona Server for MongoDB structured JSON logs (5.0 and later, mongod and mongos, plain, gzip, syslog/journald or Kubernetes pod logs, one file or a whole cluster dump) and reports process and replica-set events, grouped warnings and errors, connections and authentication failures over time, slow-operation timelines, ranked query shapes, slow operations per client/user, and redacted AI-ready analysis JSON. Use when the user has mongod/mongos logs for a support case and wants to know what happened and when, which node restarted, stepped down or lost its sync source, which warnings or errors were logged, who opened connections or failed to authenticate, which queries were slow, which client sent them, or which mongodb-logstat report or flags to use; also when they paste mongodb-logstat output to explain, or when changing mongodb-logstat code or docs. Not for FTDC diagnostic.data (use mongodb-ftdcstat) or for sanitizing customer data (use mongodb-log-obfuscator-go).
 ---
 
 # mongodb-logstat
@@ -34,7 +34,7 @@ If you changed the source in this session, rebuild before running.
 ## Usage
 
 ```text
-mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
+mongodb-logstat --report timeline|queries|clients|analysis|events|messages|connections [--json] [--from TIME] [--to TIME] [--bucket 1h] [--group-by optype|namespace|query|category|node] [--top N] [--sort-by total-duration|count|p95|max|docs-examined] [--include-internal] [--fill-gaps] [--max-buckets N] [--verbose] <file-or-dir> [...]
 ```
 
 ### Input rules
@@ -56,10 +56,11 @@ mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--js
 ### Flag rules
 
 - `--report` is required. `analysis` is always JSON.
-- `--top`: default 20 for `queries`, query timelines and `analysis`; all for
-  `clients` and `messages`; `0` means all. `events` ignores it.
-- `--group-by` and `--bucket` are for `timeline` (`--bucket` also sets the
-  `analysis` timeline). `--group-by node` gives one column per mongod/mongos.
+- `--top`: default 20 for `queries`, query timelines, `analysis`, and the
+  client and failure lists of `connections`; all for `clients` and
+  `messages`; `0` means all. `events` ignores it.
+- `--group-by` is for `timeline`; `--bucket` sets the `timeline`,
+  `connections` and `analysis` buckets. `--group-by node` gives one column per mongod/mongos.
 - `--sort-by` ranks `queries`, `clients` (default `count`) and `analysis`.
 - Exit 0 for a report (also when nothing matched), 1 when no input file could
   be read, 2 for usage errors.
@@ -75,6 +76,7 @@ mongodb-logstat --report timeline|queries|clients|analysis|events|messages [--js
 | Which kinds of operations were slow over time | `--report timeline --group-by optype` (or `namespace`, `query`, `category`) |
 | Which query shapes cost the most | `--report queries --top 20` |
 | Which user / client IP / application sent the slow operations | `--report clients` |
+| Connection storms, open connections over time, who connects, auth failures, connections refused | `--report connections` (add `--bucket`) |
 | Evidence for one window: shapes, plans, scan ratios, indicators, hot windows | `--report analysis --from ... --to ...` |
 | Exact values, filtering, counting | `--json` piped through `jq` (see references) |
 
@@ -94,11 +96,14 @@ with `--from/--to` once you know the window.
    a day, `1m` for an hour) to see when and where slow operations happened.
 4. **`queries`** or **`analysis`** for the window you found (`--from/--to`).
    `analysis` is JSON for reading with `jq`; do not read it whole.
-5. **`clients`** when the question is who sent the load.
+5. **`clients`** when the question is who sent the load; **`connections`**
+   when it is connections or authentication (churn, limit reached, failed
+   logins). Pick a bucket that keeps rows few: rows are buckets x nodes.
 
 Measured sizes on a 7-node, 3-day sharded cluster (25 rotated files,
 850 k slow operations): text `events` 5 KB, `messages` 5 KB, `queries` 7 KB,
-`clients` 8 KB, `timeline` (1 h buckets) 11 KB; their JSON is 2-10x larger
+`clients` 8 KB, `timeline` (1 h buckets) 11 KB, `connections` 17 KB with
+`--bucket 6h` (70 KB with the default 1 h); their JSON is 2-10x larger
 (`clients` 85 KB); `analysis` 210 KB. So read 1-3 as text, and `analysis`
 only through `jq`. Use `--json` with `jq` for questions
 like "how many times", "which node first", or "between which events":
@@ -139,6 +144,12 @@ More recipes and every JSON field are in [references/json.md](references/json.md
 - **clients**: operations are tied to users by exact connection (`ctx`), never
   by IP. `uncorrelated_slow_ops` are operations whose connection was opened
   before the log starts; on shards behind mongos that is often most of them.
+- **connections**: `open_max`/`open_last` are the `connectionCount` that
+  mongod logs on each accept/end, so they are open connections at that
+  moment, not an average. `ended` above `accepted` and a falling open count
+  at the start are connections opened before the log began. Client
+  applications and drivers come from `client metadata` lines from that IP,
+  so an IP shared by several apps lists them all.
 - **events** state facts only, no verdicts. `rsState` is this node's own
   transition; `memberState` is another member as seen by this node.
 - **messages** group by severity, component, log id, and message text, so the
@@ -161,6 +172,17 @@ Facts first, then a cause, with evidence from at least two sources:
   `messages` W `REPL` 21122 "Oplog fetcher stopped querying remote oplog with
   error" (read its sample `error`), `memberState` flips. Then FTDC
   (`mongodb-ftdcstat --view repl --verbose`) for lag and fetch rates.
+- **Connection churn:** `connections` rows with `accepted` and `ended` far
+  above the change in `open_*` (many short-lived connections), concentrated
+  on a few client IPs; the clients list names the application/driver. Short
+  connections to mongos are typical of apps without pooling.
+- **Connection limit:** `refused` > 0 with `open_max` at `net.maxIncomingConnections`
+  (check the startup options) or the OS limit.
+- **Authentication failures:** `connections` failures by user@db and error:
+  `MechanismUnavailable` (user has no credentials for that SCRAM mechanism),
+  `AuthenticationFailed` (wrong password or user), `AuthenticationAbandoned`
+  (client disconnected mid-handshake). Many client IPs for one user means a
+  whole application tier, not one host.
 - **Network / TLS:** `messages` W `NETWORK` 23234/23235 (certificates),
   4615610 "Failed to check socket connectivity", 23019 slow DNS.
 - **Query timeouts / errors:** `messages` W `QUERY` 23798 "Plan executor
